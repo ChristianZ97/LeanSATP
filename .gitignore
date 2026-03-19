@@ -1,0 +1,11 @@
+.lake/
+lake-manifest.json
+.venv/
+cache/
+python/.ruff_cache/
+python/.mypy_cache/
+python/.pytest_cache/
+python/src/*.egg-info/
+uv.lock
+**/__pycache__/
+.DS_Store
