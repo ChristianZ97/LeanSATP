@@ -112,15 +112,9 @@ private def inferUrl : String :=
 
 private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "<satp>") :
     Except String (TSyntax ``tacticSeq) :=
-  let parser := andthenFn whitespace Lean.Parser.Tactic.tacticSeq.fn
-  let ictx := mkInputContext input fileName
-  let state := parser.run ictx { env, options := {} } (getTokenTable env) (mkParserState input)
-  if state.hasError then
-    .error (state.toErrorMsg ictx)
-  else if state.pos.atEnd input then
-    .ok ⟨state.stxStack.back⟩
-  else
-    .error ((state.mkError "end of input").toErrorMsg ictx)
+  match Lean.Parser.runParserCategory env `tacticSeq input fileName with
+  | .ok stx => .ok ⟨stx⟩
+  | .error err => .error err
 
 private def hypothesisJson (decl : LocalDecl) : MetaM Json := do
   let declType ← instantiateMVars decl.type
