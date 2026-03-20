@@ -54,7 +54,7 @@ If the Python environment, checkpoint, or inference service is unavailable, Lean
 
 LeanSATP has two runtime layers:
 
-- **Lean**: Lean `v4.26.0` and the matching Mathlib version.
+- **Lean**: Lean `v4.26.0`, Mathlib `v4.26.0`, and `import Mathlib` in any file that uses `satp` (the tactic pool requires Mathlib tactics).
 - **Python**: either [`uv`](https://docs.astral.sh/uv/) on your `PATH`, or a Python `>=3.10` environment with the dependencies from this repository's [pyproject.toml](pyproject.toml).
 
 The recommended path is to install `uv`. Then LeanSATP can provision its Python runtime on first use via `uv run`.
