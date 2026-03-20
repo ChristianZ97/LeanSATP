@@ -1,1 +1,1 @@
-import LeanSATP.Tactic
+import LeanSATP.Bridge
