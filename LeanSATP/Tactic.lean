@@ -112,7 +112,7 @@ private def inferUrl : String :=
 
 private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "<satp>") :
     Except String (TSyntax ``tacticSeq) :=
-  match Lean.Parser.runParserCategory env `tacticSeq input fileName with
+  match Lean.Parser.runParserCategory env `tactic input.trim fileName with
   | .ok stx => .ok ⟨stx⟩
   | .error err => .error err
 
