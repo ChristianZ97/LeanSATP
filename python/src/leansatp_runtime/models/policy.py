@@ -113,7 +113,7 @@ def to_lean4_string(
         if priority > 0:
             tactic_name = config.SAFE_TACTICS[idx]
             aesop_priority = 5 - priority  # level 4→1 (highest), level 1→4
-            rule_str = f"    (add safe {aesop_priority} (by {tactic_name}))"
+            rule_str = f"    (add safe {aesop_priority} tactic (by {tactic_name}))"
             rule_entries.append((0, -priority, tactic_name, rule_str))
 
     # 2. Unsafe Rules (priority 0 = disabled, 1-4 → 70%,80%,90%,100%)
@@ -122,7 +122,7 @@ def to_lean4_string(
         if priority > 0:
             tactic_name = config.UNSAFE_TACTICS[idx]
             prob_pct = UNSAFE_PROB[priority]
-            rule_str = f"    (add unsafe {prob_pct} (by {tactic_name}))"
+            rule_str = f"    (add unsafe {prob_pct} tactic (by {tactic_name}))"
             rule_entries.append((1, -priority, tactic_name, rule_str))
 
     # 3. Lemma Rules (priority 0 = disabled, 1-4 → 10%,20%,30%,40%)
