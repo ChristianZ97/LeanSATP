@@ -100,7 +100,9 @@ private def describeRunner (runner : ServiceRunner) : String :=
   | other => other
 
 private def pythonEnvironmentMessage (cfg : RuntimeConfig) : MessageData :=
-  m!"satp python environment unavailable under {cfg.repoRoot}; install `uv`, or use a Python environment with LeanSATP runtime dependencies"
+  m!"satp: no Python runtime found under {cfg.repoRoot}\n" ++
+  m!"  • Install uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh\n" ++
+  m!"  • Then run: uv sync  (installs dependencies and downloads checkpoint)"
 
 private def healthUrl : String :=
   s!"http://{defaultServerHost}:{defaultServerPort}/health"
@@ -215,11 +217,20 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
   try
     let _ ← liftM (m := IO) <| spawnService cfg runner
   catch _ =>
-    return .error m!"satp python environment unavailable: failed to start {describeRunner runner}"
+    return .error m!"satp: failed to start inference service\n" ++
+      m!"  • Command: {describeRunner runner}\n" ++
+      m!"  • Try running `uv sync` in {cfg.repoRoot} to reinstall dependencies"
   let ready : Bool ← liftM (m := IO) waitForServer
   if ready then
     return .ok ()
-  return .error m!"satp could not start the Python inference service with {describeRunner runner}; this usually means a Python environment/dependency or checkpoint problem under {cfg.repoRoot}"
+  return .error
+    m!"satp: inference service did not respond (timeout after 20s)\n" ++
+    m!"  • Service command: {describeRunner runner}\n" ++
+    m!"  • Possible causes:\n" ++
+    m!"    1. Missing checkpoint — run: uv sync\n" ++
+    m!"    2. Checkpoint path mismatch — expected: {cfg.checkpoint}\n" ++
+    m!"    3. Missing Python deps — run: uv sync\n" ++
+    m!"    4. Port conflict — check if port 5177 is already in use: lsof -i :5177"
 
 private def callInferenceService
     (_cfg : RuntimeConfig)
