@@ -199,7 +199,7 @@ private def spawnService (cfg : RuntimeConfig) (runner : ServiceRunner) : IO Uni
   }
   pure ()
 
-private partial def waitForServer (attempts : Nat := 80) : IO Bool := do
+private partial def waitForServer (attempts : Nat := 240) : IO Bool := do
   if attempts == 0 then
     return false
   if ← checkServerHealth then
