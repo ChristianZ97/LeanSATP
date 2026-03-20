@@ -75,7 +75,7 @@ Because the model checkpoint takes several seconds to load, **start the inferenc
 
 ```bash
 cd /path/to/LeanSATP   # or .lake/packages/LeanSATP if used as a dependency
-uv run python -m leansatp_runtime.service --serve \
+uv run -m leansatp_runtime.service --serve \
   --checkpoint hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt \
   --cache-dir cache/ \
   --host 127.0.0.1 \
