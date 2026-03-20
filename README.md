@@ -37,6 +37,7 @@ require mathlib from git "https://github.com/leanprover-community/mathlib4.git" 
 Then use `lake update` to fetch LeanSATP and the corresponding versions of Lean and Mathlib. The following example should then compile without any warnings or errors:
 
 ```lean
+import Mathlib
 import LeanSATP
 
 example : True := by
