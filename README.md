@@ -67,6 +67,31 @@ python3 -m pip install -e .
 
 On first use, LeanSATP downloads the fixed Hugging Face checkpoint `ChristianZ97/SATP-aesop-policy`. Internet access is therefore required the first time the checkpoint is fetched.
 
+## First-Time Setup
+
+Because the model checkpoint takes several seconds to load, **start the inference service manually before running any `satp` tactic** the first time. This avoids a timeout on the first invocation.
+
+**Terminal 1** — start the inference service and wait until it is ready:
+
+```bash
+cd /path/to/LeanSATP   # or .lake/packages/LeanSATP if used as a dependency
+uv run python -m leansatp_runtime.service --serve \
+  --checkpoint hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt \
+  --cache-dir cache/ \
+  --host 127.0.0.1 \
+  --port 5177
+```
+
+**Terminal 2** — once the service is ready, run Lean as usual:
+
+```bash
+lake env lean YourFile.lean
+# or
+lake build
+```
+
+On subsequent uses, `satp` will attempt to start the service automatically in the background. The service only needs to be started manually the first time, or after the process has been killed.
+
 ## Components
 
 Currently, LeanSATP consists of/depends on the following components:
@@ -108,7 +133,11 @@ If `premise_embeddings.npy` and `premises_raw.npy` are absent, LeanSATP falls ba
 
 ### Debugging
 
-If `satp` cannot start the Python side, the warning message points to a Python environment or checkpoint setup problem under the local LeanSATP package directory.
+If `satp` logs a fallback warning, the message describes the specific failure:
+
+- **No Python runtime found**: install `uv` with `curl -LsSf https://astral.sh/uv/install.sh | sh`, then run `uv sync`.
+- **Service failed to spawn**: run `uv sync` inside the LeanSATP package directory to reinstall dependencies.
+- **Service did not respond (timeout)**: the model is still loading. Start the service manually in a separate terminal (see [First-Time Setup](#first-time-setup)) and wait until it is ready before invoking `satp`. Also check for a port conflict with `lsof -i :5177`.
 
 You can disable the import-time checkpoint prefetch by setting:
 
