@@ -13,17 +13,28 @@ private def defaultServerHost : String := "127.0.0.1"
 private def defaultServerPort : Nat := 5177
 private def defaultRequestTimeout : Nat := 30
 
-private partial def ascend (path : FilePath) (steps : Nat) : FilePath :=
-  if steps == 0 then
-    path
-  else
-    match path.parent with
-    | some parent => ascend parent (steps - 1)
-    | none => path
+private def hasRuntimeFiles (path : FilePath) : IO Bool := do
+  let pyproject := path / "pyproject.toml"
+  let runtime := path / "python" / "src" / "leansatp_runtime" / "service.py"
+  return (← pyproject.pathExists) && (← runtime.pathExists)
+
+private partial def findPackageRootFrom (path : FilePath) (fuel : Nat := 16) : IO FilePath := do
+  if fuel == 0 then
+    return path.normalize
+  if ← hasRuntimeFiles path then
+    return path.normalize
+  match path.parent with
+  | some parent => findPackageRootFrom parent (fuel - 1)
+  | none => return path.normalize
 
 private def packageRoot : IO FilePath := do
-  let oleanPath ← Lean.findOLean `LeanSATP.Tactic
-  return (ascend oleanPath 6).normalize
+  let oleanPath ← Lean.findOLean `LeanSATP.Bridge
+  let start := oleanPath.parent.getD oleanPath
+  let root ← findPackageRootFrom start
+  if ← hasRuntimeFiles root then
+    Lean.realPathNormalized root
+  else
+    throw <| IO.userError s!"LeanSATP package root not found from {oleanPath}"
 
 private def defaultRepoRoot : IO FilePath := do
   Lean.realPathNormalized (← packageRoot)
