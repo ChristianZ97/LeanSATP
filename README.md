@@ -55,6 +55,8 @@ example : True := by
 
 On first import, LeanSATP automatically downloads the checkpoint `ChristianZ97/SATP-aesop-policy` from Hugging Face. Internet access is required for this step. On first invocation of `satp`, LeanSATP starts its bundled local PyTorch inference service using this package's own Python runtime. No external server is required.
 
+If CUDA is visible but unusable on the current machine, the inference service now automatically downgrades itself to CPU and continues serving requests. This keeps `satp` on the SATP path instead of failing over to plain `aesop` for GPU compatibility issues.
+
 ## Requirements
 
 LeanSATP has two runtime layers:
@@ -81,6 +83,16 @@ Because the model checkpoint takes several seconds to load, **start the inferenc
 ```bash
 cd /path/to/LeanSATP   # or .lake/packages/LeanSATP if used as a dependency
 uv run -m leansatp_runtime.service --serve \
+  --checkpoint hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt \
+  --cache-dir cache/ \
+  --host 127.0.0.1 \
+  --port 5177
+```
+
+If you want to force CPU explicitly, prefix the command with `CUDA_VISIBLE_DEVICES=`:
+
+```bash
+CUDA_VISIBLE_DEVICES= uv run -m leansatp_runtime.service --serve \
   --checkpoint hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt \
   --cache-dir cache/ \
   --host 127.0.0.1 \
@@ -137,6 +149,7 @@ If `satp` logs a fallback warning, the message describes the specific failure:
 - **No Python runtime found**: install `uv` with `curl -LsSf https://astral.sh/uv/install.sh | sh`, then run `uv sync`.
 - **Service failed to spawn**: run `uv sync` inside the LeanSATP package directory to reinstall dependencies.
 - **Service did not respond (timeout)**: the model is still loading. Start the service manually in a separate terminal (see [First-Time Setup](#first-time-setup)) and wait until it is ready before invoking `satp`. Also check for a port conflict with `lsof -i :5177`.
+- **CUDA/device compatibility errors**: LeanSATP now auto-downgrades to CPU when CUDA is visible but unusable. To force CPU from the start, run the service with `CUDA_VISIBLE_DEVICES=`.
 
 You can disable the import-time checkpoint download by setting the environment variable:
 

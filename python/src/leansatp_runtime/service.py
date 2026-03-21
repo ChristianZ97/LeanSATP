@@ -8,6 +8,7 @@ import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import threading
 from typing import Any, Optional
 
 DEFAULT_CHECKPOINT = "hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt"
@@ -19,6 +20,18 @@ _config = None
 _AesopPolicy = None
 _to_lean4_string = None
 _LoRAConfig = None
+_CUDA_ERROR_MARKERS = (
+    "cuda error",
+    "cudnn",
+    "cublas",
+    "cuda-capable",
+    "cuda capability",
+    "cuda driver",
+    "cuda runtime",
+    "no kernel image is available",
+    "not compatible with the current pytorch installation",
+    "torch not compiled with cuda enabled",
+)
 
 
 def _ensure_imports() -> None:
@@ -63,12 +76,46 @@ def ensure_checkpoint_download(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str
     return resolve_checkpoint_path(checkpoint_path)
 
 
-def load_policy(checkpoint_path: str, cache_dir: str):
+def preferred_device() -> str:
+    """Choose the default runtime device."""
+    _ensure_imports()
+    return "cuda" if _torch.cuda.is_available() else "cpu"
+
+
+def _error_messages(exc: BaseException) -> list[str]:
+    messages: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = str(current).strip()
+        if text:
+            messages.append(text)
+        current = current.__cause__ or current.__context__
+    return messages
+
+
+def is_cuda_failure(exc: BaseException) -> bool:
+    """Return true when an exception looks like a CUDA/device runtime failure."""
+    combined = "\n".join(_error_messages(exc)).lower()
+    return any(marker in combined for marker in _CUDA_ERROR_MARKERS)
+
+
+def short_error_summary(exc: BaseException, limit: int = 240) -> str:
+    """Compact an exception chain into a short log-friendly summary."""
+    summary = " | ".join(_error_messages(exc)) or exc.__class__.__name__
+    summary = " ".join(summary.split())
+    if len(summary) <= limit:
+        return summary
+    return summary[: limit - 3] + "..."
+
+
+def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None):
     """Load the LeanSATP policy model once and keep it resident."""
     _ensure_imports()
 
     checkpoint_path = resolve_checkpoint_path(checkpoint_path)
-    device = "cuda" if _torch.cuda.is_available() else "cpu"
+    device = device or preferred_device()
 
     ckpt = _torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
@@ -240,7 +287,47 @@ class SATPInferenceEngine:
     ):
         self.checkpoint_path = checkpoint_path
         self.cache_dir = cache_dir
-        self.model_and_device = load_policy(checkpoint_path, cache_dir)
+        self._lock = threading.Lock()
+        self._downgrade_logged = False
+        self.preferred_device = preferred_device()
+        self.active_device = self.preferred_device
+        self.model_and_device = self._load_with_fallback(self.preferred_device)
+
+    def _log_cpu_downgrade(self, exc: BaseException, *, stage: str) -> None:
+        if self._downgrade_logged:
+            return
+        summary = short_error_summary(exc)
+        print(
+            f"[LeanSATP] Warning: falling back from cuda to cpu during {stage}: {summary}",
+            file=sys.stderr,
+        )
+        self._downgrade_logged = True
+
+    def _set_model_state(self, model_and_device) -> None:
+        self.model_and_device = model_and_device
+        self.active_device = model_and_device[1]
+
+    def _load_engine(self, device: str):
+        model_and_device = load_policy(
+            self.checkpoint_path, self.cache_dir, device=device
+        )
+        self._set_model_state(model_and_device)
+        return model_and_device
+
+    def _load_with_fallback(self, device: str):
+        try:
+            return self._load_engine(device)
+        except Exception as exc:
+            if device != "cuda" or not is_cuda_failure(exc):
+                raise
+            self._log_cpu_downgrade(exc, stage="startup")
+            return self._load_engine("cpu")
+
+    def _downgrade_to_cpu_locked(self, exc: BaseException, *, stage: str) -> None:
+        if self.active_device != "cuda":
+            return
+        self._log_cpu_downgrade(exc, stage=stage)
+        self._load_engine("cpu")
 
     def infer(
         self,
@@ -252,12 +339,24 @@ class SATPInferenceEngine:
     ) -> dict[str, Any]:
         hypotheses = hypotheses or []
         formal_statement = build_formal_statement(goal, hypotheses)
-        tactic = policy_tactic(
-            self.model_and_device,
-            formal_statement,
-            tactic_name=tactic_name,
-            user_lemmas=user_lemmas,
-        )
+        with self._lock:
+            try:
+                tactic = policy_tactic(
+                    self.model_and_device,
+                    formal_statement,
+                    tactic_name=tactic_name,
+                    user_lemmas=user_lemmas,
+                )
+            except Exception as exc:
+                if self.active_device != "cuda" or not is_cuda_failure(exc):
+                    raise
+                self._downgrade_to_cpu_locked(exc, stage="inference")
+                tactic = policy_tactic(
+                    self.model_and_device,
+                    formal_statement,
+                    tactic_name=tactic_name,
+                    user_lemmas=user_lemmas,
+                )
         return {
             "tactic": tactic,
             "formal_statement": formal_statement,
