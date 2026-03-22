@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import sys
+import warnings
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 from unittest.mock import patch
 
@@ -150,6 +152,44 @@ class SATPInferenceEngineTests(unittest.TestCase):
         self.assertEqual(load_calls, ["cuda"])
         self.assertEqual(engine.active_device, "cuda")
 
+    def test_full_proof_trace_is_pretty_printed(self) -> None:
+        def fake_load_policy(_checkpoint: str, _cache: str, device: str | None = None):
+            return (f"{device}-model", device, False)
+
+        tactic = "aesop (config := { maxRuleApplications := 42 })"
+        stderr = StringIO()
+        with (
+            patch.object(service, "preferred_device", return_value="cpu"),
+            patch.object(service, "load_policy", side_effect=fake_load_policy),
+            patch.object(service, "policy_tactic", return_value=tactic),
+            redirect_stderr(stderr),
+        ):
+            engine = service.SATPInferenceEngine("checkpoint", "cache")
+            result = engine.infer(goal="True")
+
+        output = stderr.getvalue()
+        self.assertEqual(result["tactic"], tactic)
+        self.assertIn("INFO     [LeanSATP] Full proof (cpu):", output)
+        self.assertIn("    theorem satp_goal", output)
+        self.assertIn("      : True := by", output)
+        self.assertIn("      aesop (config := { maxRuleApplications := 42 })", output)
+
+    def test_full_proof_trace_can_be_colorized(self) -> None:
+        stream = StringIO()
+        service.print_full_proof_trace(
+            "theorem satp_goal\n  : True := by",
+            "aesop (config := { maxRuleApplications := 42 })",
+            device="cpu",
+            stream=stream,
+            enable_color=True,
+        )
+
+        trace = stream.getvalue()
+        self.assertIn("\033[", trace)
+        self.assertIn("[LeanSATP] Full proof", trace)
+        self.assertIn("theorem", trace)
+        self.assertIn("aesop", trace)
+
 
 class SATPHTTPServerSmokeTests(unittest.TestCase):
     def test_http_infer_smoke_uses_cpu_after_cuda_fallback(self) -> None:
@@ -164,10 +204,12 @@ class SATPHTTPServerSmokeTests(unittest.TestCase):
                 raise RuntimeError("CUDA error: no kernel image is available")
             return "aesop"
 
+        stderr = StringIO()
         with (
             patch.object(service, "preferred_device", return_value="cuda"),
             patch.object(service, "load_policy", side_effect=fake_load_policy),
             patch.object(service, "policy_tactic", side_effect=fake_policy_tactic),
+            redirect_stderr(stderr),
         ):
             engine = service.SATPInferenceEngine("checkpoint", "cache")
             payload = json.dumps({"goal": "True"}).encode("utf-8")
@@ -186,6 +228,88 @@ class SATPHTTPServerSmokeTests(unittest.TestCase):
         self.assertEqual(body["tactic"], "aesop")
         self.assertEqual(engine.active_device, "cpu")
         self.assertEqual(load_calls, ["cuda", "cpu"])
+        self.assertIn("INFO     → request POST /infer", stderr.getvalue())
+        self.assertIn("INFO     ← response 200 POST /infer", stderr.getvalue())
+
+
+class SATPServiceLifecycleTests(unittest.TestCase):
+    def test_suppress_startup_noise_hides_library_chatter(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stderr(stderr), redirect_stdout(stdout):
+            with service._suppress_startup_noise():
+                print("library stdout noise")
+                print("library stderr noise", file=sys.stderr)
+                warnings.warn("Found GPU0 incompatible CUDA capability", UserWarning)
+
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_serve_shutdown_is_graceful_on_keyboard_interrupt(self) -> None:
+        class FakeEngine:
+            preferred_device = "cuda"
+            active_device = "cpu"
+            retrieval_enabled = False
+
+            def summary(self) -> str:
+                return (
+                    "SATP inference engine initialized with: "
+                    "PREFERRED_DEVICE=cuda, ACTIVE_DEVICE=cpu, RETRIEVAL=disabled"
+                )
+
+        fake_engine = FakeEngine()
+        signal_calls: list[tuple[int, object]] = []
+
+        class FakeServer:
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def server_close(self) -> None:
+                signal_calls.append(("closed", None))
+
+        stderr = StringIO()
+        with (
+            patch.object(service, "SATPInferenceEngine", return_value=fake_engine),
+            patch.object(service, "_SATPHTTPServer", return_value=FakeServer()),
+            patch.object(
+                service.signal, "getsignal", side_effect=["old-int", "old-term"]
+            ),
+            patch.object(
+                service.signal,
+                "signal",
+                side_effect=lambda sig, handler: signal_calls.append((sig, handler)),
+            ),
+            redirect_stderr(stderr),
+        ):
+            service.serve(host="127.0.0.1", port=5177)
+
+        output = stderr.getvalue()
+        self.assertIn("INFO     Started server process [", output)
+        self.assertIn("INFO     Waiting for application startup.", output)
+        self.assertIn(
+            "INFO     SATP inference engine initialized with: "
+            "PREFERRED_DEVICE=cuda, ACTIVE_DEVICE=cpu, RETRIEVAL=disabled",
+            output,
+        )
+        self.assertIn("INFO     Application startup complete.", output)
+        self.assertIn(
+            "INFO     LeanSATP service running on http://127.0.0.1:5177",
+            output,
+        )
+        self.assertIn("INFO     Try me with:", output)
+        self.assertIn("curl --request POST \\", output)
+        self.assertIn("--url http://localhost:5177/infer \\", output)
+        self.assertIn('--data \'{"goal":"True"}\' | jq', output)
+        self.assertNotIn("tactic_name", output)
+        self.assertIn("INFO     Shutting down", output)
+        self.assertIn("INFO     Waiting for application shutdown.", output)
+        self.assertIn("INFO     Application shutdown complete.", output)
+        self.assertIn("INFO     Finished server process [", output)
+        self.assertEqual(signal_calls[0][0], service.signal.SIGINT)
+        self.assertEqual(signal_calls[1][0], service.signal.SIGTERM)
+        self.assertEqual(signal_calls[2], ("closed", None))
+        self.assertEqual(signal_calls[3], (service.signal.SIGINT, "old-int"))
+        self.assertEqual(signal_calls[4], (service.signal.SIGTERM, "old-term"))
 
 
 if __name__ == "__main__":

@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import io
 import json
+import os
 import re
+import signal
 import sys
+import textwrap
+import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
@@ -20,6 +26,13 @@ _config = None
 _AesopPolicy = None
 _to_lean4_string = None
 _LoRAConfig = None
+_RichConsole = None
+_RichSyntax = None
+_LOG_LEVEL_COLORS = {
+    "INFO": "blue",
+    "WARNING": "yellow",
+    "ERROR": "red",
+}
 _CUDA_ERROR_MARKERS = (
     "cuda error",
     "cudnn",
@@ -66,7 +79,8 @@ def resolve_checkpoint_path(checkpoint_path: str) -> str:
             )
         repo_id = f"{parts[0]}/{parts[1]}"
         filename = parts[2]
-        return hf_hub_download(repo_id=repo_id, filename=filename)
+        with _suppress_startup_noise():
+            return hf_hub_download(repo_id=repo_id, filename=filename)
 
     return checkpoint_path
 
@@ -110,6 +124,107 @@ def short_error_summary(exc: BaseException, limit: int = 240) -> str:
     return summary[: limit - 3] + "..."
 
 
+def _ensure_rich() -> None:
+    """Import rich lazily for Kimina-style terminal rendering."""
+    global _RichConsole, _RichSyntax
+    if _RichConsole is not None:
+        return
+    try:
+        from rich.console import Console as _Console
+        from rich.syntax import Syntax as _Syntax
+    except ImportError:
+        _RichConsole = False
+        _RichSyntax = False
+        return
+    _RichConsole = _Console
+    _RichSyntax = _Syntax
+
+
+@contextmanager
+def _suppress_startup_noise():
+    """Hide third-party model-loading chatter during service startup."""
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    with (
+        redirect_stdout(io.StringIO()),
+        redirect_stderr(io.StringIO()),
+        warnings.catch_warnings(),
+    ):
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*cuda capability.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*Minimum and Maximum cuda capability supported.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*Please install PyTorch with a following CUDA.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*is not compatible with the current PyTorch installation.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*You are sending unauthenticated requests to the HF Hub.*",
+            category=UserWarning,
+        )
+        yield
+
+
+def _supports_color(stream) -> bool:
+    """Enable colored terminal output only for interactive terminals unless forced."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty and isatty())
+
+
+def _make_console(stream):
+    """Create a rich console configured like Kimina's terminal output."""
+    _ensure_rich()
+    if not _RichConsole:
+        return None
+    return _RichConsole(
+        file=stream,
+        force_terminal=True,
+        color_system="truecolor",
+        highlight=False,
+        soft_wrap=True,
+    )
+
+
+def log_service(
+    level: str,
+    message: str,
+    *,
+    stream=None,
+    enable_color: bool | None = None,
+) -> None:
+    """Emit Kimina-style prefixed logs from the SATP service."""
+    stream = stream or sys.stderr
+    if enable_color is None:
+        enable_color = _supports_color(stream)
+
+    prefix = f"{level:<8}"
+    if enable_color:
+        console = _make_console(stream)
+        if console is not None:
+            color = _LOG_LEVEL_COLORS.get(level, "white")
+            console.print(f"[{color}]{prefix}[/{color}] {message}")
+            return
+
+    print(f"{prefix} {message}", file=stream)
+
+
 def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None):
     """Load the LeanSATP policy model once and keep it resident."""
     _ensure_imports()
@@ -123,9 +238,9 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
     if calib_key in state_dict:
         ckpt_lemma_k = state_dict[calib_key].shape[0]
         if ckpt_lemma_k != _config.LEMMA_K:
-            print(
+            log_service(
+                "INFO",
                 f"[LeanSATP] Overriding LEMMA_K: {_config.LEMMA_K} -> {ckpt_lemma_k}",
-                file=sys.stderr,
             )
             _config.LEMMA_K = ckpt_lemma_k
 
@@ -141,22 +256,23 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
             ),
         )
 
-    model = _AesopPolicy(
-        freeze_base=True,
-        use_lora=use_lora,
-        lora_config=lora_cfg,
-        device=device,
-        cache_dir=cache_dir,
-    )
+    with _suppress_startup_noise():
+        model = _AesopPolicy(
+            freeze_base=True,
+            use_lora=use_lora,
+            lora_config=lora_cfg,
+            device=device,
+            cache_dir=cache_dir,
+        )
     model.load_state_dict(state_dict, strict=False)
     try:
         model.load_premise_embeddings()
         retrieval_enabled = True
     except FileNotFoundError as exc:
         retrieval_enabled = False
-        print(
+        log_service(
+            "INFO",
             f"[LeanSATP] Retrieval disabled: {exc}",
-            file=sys.stderr,
         )
     model.to(device)
     model.eval()
@@ -181,6 +297,98 @@ def build_formal_statement(goal: str, hypotheses: list[dict[str, str]]) -> str:
             lines.append(f"  ({name} : {hyp_type})")
     lines.append(f"  : {(goal or '').strip()} := by")
     return "\n".join(lines)
+
+
+def render_full_proof(formal_statement: str, tactic: str) -> str:
+    """Combine the theorem prompt and generated tactic into a proof sketch."""
+    return formal_statement.rstrip() + "\n" + textwrap.indent(tactic.rstrip(), "  ")
+
+
+def _indent_block(block: str, prefix: str = "    ") -> str:
+    """Indent a multi-line block for human-readable stderr traces."""
+    cleaned = block.rstrip() or "<empty>"
+    return textwrap.indent(cleaned, prefix)
+
+
+def render_full_proof_trace(
+    formal_statement: str,
+    tactic: str,
+    *,
+    device: str,
+) -> str:
+    """Render the generated proof as a plain-text stderr block."""
+    return "\n".join(
+        [
+            f"[LeanSATP] Full proof ({device}):",
+            _indent_block(render_full_proof(formal_statement, tactic)),
+        ]
+    )
+
+
+def print_full_proof_trace(
+    formal_statement: str,
+    tactic: str,
+    *,
+    device: str,
+    stream=None,
+    enable_color: bool | None = None,
+) -> None:
+    """Print the generated proof using Kimina-style rich formatting when possible."""
+    stream = stream or sys.stderr
+    if enable_color is None:
+        enable_color = _supports_color(stream)
+
+    _ensure_rich()
+    if enable_color and _RichConsole and _RichSyntax:
+        console = _make_console(stream)
+        log_service(
+            "INFO",
+            f"[bold magenta][LeanSATP] Full proof[/bold magenta] "
+            f"([bold yellow]{device}[/bold yellow]):",
+            stream=stream,
+            enable_color=True,
+        )
+        console.print(
+            _RichSyntax(
+                render_full_proof(formal_statement, tactic),
+                "lean",
+                theme="monokai",
+                line_numbers=False,
+                word_wrap=True,
+            )
+        )
+        return
+
+    print(
+        f"INFO     {render_full_proof_trace(formal_statement, tactic, device=device)}",
+        file=stream,
+    )
+
+
+def _curl_example_host(host: str) -> str:
+    """Choose a copy-paste-friendly host for local curl examples."""
+    if host in {"0.0.0.0", "::", ""}:
+        return "localhost"
+    if host == "127.0.0.1":
+        return "localhost"
+    return host
+
+
+def render_try_me_message(host: str, port: int) -> str:
+    """Render a Kimina-style curl hint for manual service checks."""
+    curl_host = _curl_example_host(host)
+    return "Try me with:\n" + textwrap.indent(
+        "curl --request POST \\\n"
+        f"  --url http://{curl_host}:{port}/infer \\\n"
+        "  --header 'Content-Type: application/json' \\\n"
+        '  --data \'{"goal":"True"}\' | jq\n',
+        "  ",
+    )
+
+
+def _interrupt_service(_signum, _frame) -> None:
+    """Convert termination signals into the same clean shutdown path as Ctrl+C."""
+    raise KeyboardInterrupt
 
 
 def append_user_lemmas(
@@ -291,21 +499,31 @@ class SATPInferenceEngine:
         self._downgrade_logged = False
         self.preferred_device = preferred_device()
         self.active_device = self.preferred_device
+        self.retrieval_enabled = False
         self.model_and_device = self._load_with_fallback(self.preferred_device)
 
     def _log_cpu_downgrade(self, exc: BaseException, *, stage: str) -> None:
         if self._downgrade_logged:
             return
         summary = short_error_summary(exc)
-        print(
+        log_service(
+            "WARNING",
             f"[LeanSATP] Warning: falling back from cuda to cpu during {stage}: {summary}",
-            file=sys.stderr,
         )
         self._downgrade_logged = True
 
     def _set_model_state(self, model_and_device) -> None:
         self.model_and_device = model_and_device
         self.active_device = model_and_device[1]
+        self.retrieval_enabled = model_and_device[2]
+
+    def _log_inference_trace(self, formal_statement: str, tactic: str) -> None:
+        print_full_proof_trace(
+            formal_statement,
+            tactic,
+            device=self.active_device,
+            stream=sys.stderr,
+        )
 
     def _load_engine(self, device: str):
         model_and_device = load_policy(
@@ -357,10 +575,21 @@ class SATPInferenceEngine:
                     tactic_name=tactic_name,
                     user_lemmas=user_lemmas,
                 )
+            self._log_inference_trace(formal_statement, tactic)
         return {
             "tactic": tactic,
             "formal_statement": formal_statement,
         }
+
+    def summary(self) -> str:
+        """Describe the currently loaded inference engine state."""
+        retrieval = "enabled" if self.retrieval_enabled else "disabled"
+        return (
+            "SATP inference engine initialized with: "
+            f"PREFERRED_DEVICE={self.preferred_device}, "
+            f"ACTIVE_DEVICE={self.active_device}, "
+            f"RETRIEVAL={retrieval}"
+        )
 
 
 class _SATPRequestHandler(BaseHTTPRequestHandler):
@@ -376,14 +605,20 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        log_service("INFO", f"← response {status} {self.command} {self.path}")
+
+    def _log_request_start(self) -> None:
+        log_service("INFO", f"→ request {self.command} {self.path}")
 
     def do_GET(self) -> None:
+        self._log_request_start()
         if self.path != "/health":
             self._write_json(404, {"ok": False, "error": "not found"})
             return
         self._write_json(200, {"ok": True})
 
     def do_POST(self) -> None:
+        self._log_request_start()
         if self.path != "/infer":
             self._write_json(404, {"ok": False, "error": "not found"})
             return
@@ -421,13 +656,36 @@ def serve(
     cache_dir: str = DEFAULT_CACHE_DIR,
 ) -> None:
     """Start the resident LeanSATP HTTP service."""
+    pid = os.getpid()
+    log_service("INFO", f"Started server process [{pid}]")
+    log_service("INFO", "Waiting for application startup.")
     engine = SATPInferenceEngine(
         checkpoint_path=checkpoint_path,
         cache_dir=cache_dir,
     )
     server = _SATPHTTPServer((host, port), engine)
-    print(f"[LeanSATP] Serving on http://{host}:{port}", file=sys.stderr)
-    server.serve_forever()
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, _interrupt_service)
+    signal.signal(signal.SIGTERM, _interrupt_service)
+    log_service("INFO", engine.summary())
+    log_service("INFO", "Application startup complete.")
+    log_service(
+        "INFO",
+        f"LeanSATP service running on http://{host}:{port} (Press CTRL+C to quit)",
+    )
+    log_service("INFO", render_try_me_message(host, port))
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log_service("INFO", "Shutting down")
+    finally:
+        log_service("INFO", "Waiting for application shutdown.")
+        server.server_close()
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        log_service("INFO", "Application shutdown complete.")
+        log_service("INFO", f"Finished server process [{pid}]")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -458,7 +716,7 @@ def main() -> int:
         )
         return 0
 
-    print("Use --serve or --download-only", file=sys.stderr)
+    log_service("ERROR", "Use --serve or --download-only")
     return 1
 
 

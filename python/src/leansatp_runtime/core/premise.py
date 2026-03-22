@@ -58,5 +58,4 @@ def load_premises(filepath: str) -> List[Premise]:
             line = line.strip()
             if line:
                 premises.append(Premise.from_leandojo_format(line))
-    print(f"Loaded {len(premises)} premises from {filepath}")
     return premises

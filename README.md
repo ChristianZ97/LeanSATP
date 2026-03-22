@@ -2,7 +2,7 @@
 
 **LeanSATP** is the Lean 4 package implementing the **SATP** (*Steering Aesop for Theorem Proving*) policy — a learned agent that dynamically configures `aesop` on a per-theorem basis via a local PyTorch inference service.
 
-The `satp` tactic queries the model for an `aesop` configuration tailored to the current proof goal, then runs the resulting tactic inside Lean. If the Python side is unavailable, `satp` logs one warning and falls back to plain `aesop`.
+The `satp` tactic queries a local SATP inference service for an `aesop` configuration tailored to the current proof goal, then runs the resulting tactic inside Lean. The Python service itself does not perform formal verification: it only generates the tactic. Lean then executes that tactic and checks the proof as usual. If the Python side is unavailable, `satp` logs one warning and falls back to plain `aesop`.
 
 ## Highlights
 
@@ -53,9 +53,9 @@ example : True := by
   satp
 ```
 
-On first import, LeanSATP automatically downloads the checkpoint `ChristianZ97/SATP-aesop-policy` from Hugging Face. Internet access is required for this step. On first invocation of `satp`, LeanSATP starts its bundled local PyTorch inference service using this package's own Python runtime. No external server is required.
+On first import, LeanSATP automatically downloads the checkpoint `ChristianZ97/SATP-aesop-policy` from Hugging Face. Internet access is required for this step.
 
-If CUDA is visible but unusable on the current machine, the inference service now automatically downgrades itself to CPU and continues serving requests. This keeps `satp` on the SATP path instead of failing over to plain `aesop` for GPU compatibility issues.
+If CUDA is visible but unusable on the current machine, the inference service automatically downgrades itself to CPU and continues serving requests. This fallback happens both during startup and during inference, and once the service has downgraded it stays on CPU for the rest of the process lifetime. This keeps `satp` on the SATP path instead of failing over to plain `aesop` for GPU compatibility issues.
 
 ## Requirements
 
@@ -74,7 +74,16 @@ python3 -m pip install -e .
 ```
 
 
-## First-Time Setup
+## Starting SATP
+
+There are two ways to start SATP:
+
+- **Recommended: start the SATP server manually first.** This avoids the first-use cold-start timeout and lets you see the generated proof sketch in the service terminal.
+- **On-demand: let `satp` start it automatically.** If no SATP server is running, the Lean wrapper will try to launch one in the background. If that launch fails, or if the service later fails to answer, `satp` logs a warning and falls back to plain `aesop`.
+
+The SATP server always listens on `127.0.0.1:5177` by default, and `satp` talks to `http://127.0.0.1:5177/infer`.
+
+## Manual Startup
 
 Because the model checkpoint takes several seconds to load, **start the inference service manually before running any `satp` tactic** the first time. This avoids a timeout on the first invocation.
 
@@ -88,6 +97,12 @@ uv run -m leansatp_runtime.service --serve \
   --host 127.0.0.1 \
   --port 5177
 ```
+
+When the service is ready, it prints a Kimina-style startup block including:
+
+- `LeanSATP service running on http://127.0.0.1:5177`
+- `Try me with:`
+- a copy-pasteable `curl` example for `/infer`
 
 If you want to force CPU explicitly, prefix the command with `CUDA_VISIBLE_DEVICES=`:
 
@@ -107,7 +122,42 @@ lake env lean YourFile.lean
 lake build
 ```
 
-On subsequent uses, `satp` will attempt to start the service automatically in the background. Manual startup is only needed the first time, or after the process has been killed.
+If you are using LeanSATP through another Lean project, run the same command from the copied package directory:
+
+```bash
+cd .lake/packages/LeanSATP
+uv run -m leansatp_runtime.service --serve \
+  --checkpoint hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt \
+  --cache-dir cache/ \
+  --host 127.0.0.1 \
+  --port 5177
+```
+
+## Automatic Startup via `satp`
+
+If no SATP server is already running, invoking `satp` makes LeanSATP try to start one automatically in the background using the package's own Python runtime.
+
+The automatic path is convenient, but it has two limitations:
+
+- the first cold start can take long enough to hit the Lean-side timeout
+- you do not see the SATP service logs unless you start it manually yourself
+
+So the exact behavior is:
+
+- server already running: `satp` reuses it
+- server not running: `satp` tries to launch it automatically
+- launch or inference failure: `satp` logs a warning and falls back to plain `aesop`
+
+**Optional sanity check** — verify the Python service directly before involving Lean:
+
+```bash
+curl --request POST \
+  --url http://localhost:5177/infer \
+  --header 'Content-Type: application/json' \
+  --data '{"goal":"True"}' | jq
+```
+
+The service logs each request as `→ request ...` and `← response ...`, and on successful inference it prints the full generated Lean proof sketch, including the `theorem ... := by` header and the generated `aesop` configuration.
 
 ## Components
 
@@ -148,8 +198,9 @@ If `satp` logs a fallback warning, the message describes the specific failure:
 
 - **No Python runtime found**: install `uv` with `curl -LsSf https://astral.sh/uv/install.sh | sh`, then run `uv sync`.
 - **Service failed to spawn**: run `uv sync` inside the LeanSATP package directory to reinstall dependencies.
-- **Service did not respond (timeout)**: the model is still loading. Start the service manually in a separate terminal (see [First-Time Setup](#first-time-setup)) and wait until it is ready before invoking `satp`. Also check for a port conflict with `lsof -i :5177`.
+- **Service did not respond (timeout)**: the model is still loading. Start the service manually in a separate terminal (see [Manual Startup](#manual-startup)) and wait until it is ready before invoking `satp`. Also check for a port conflict with `lsof -i :5177`.
 - **CUDA/device compatibility errors**: LeanSATP now auto-downgrades to CPU when CUDA is visible but unusable. To force CPU from the start, run the service with `CUDA_VISIBLE_DEVICES=`.
+- **Want to inspect what SATP actually generated**: start the service manually and watch its terminal. Successful requests print the full proof sketch that LeanSATP is about to execute.
 
 You can disable the import-time checkpoint download by setting the environment variable:
 
