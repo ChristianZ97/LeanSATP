@@ -24,7 +24,6 @@ from .components import (
     PremiseEncoder,
     LoRAConfig,
     apply_lora_to_model,
-    count_lora_parameters,
 )
 
 
@@ -183,7 +182,6 @@ class AesopPolicy(nn.Module, PyTorchModelHubMixin):
         self.use_lora = use_lora
         self.lora_config = lora_config or LoRAConfig()
 
-        print(f"Loading {config.SENTENCE_ENCODER}...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.SENTENCE_ENCODER, cache_dir=cache_dir
         )
@@ -196,7 +194,6 @@ class AesopPolicy(nn.Module, PyTorchModelHubMixin):
             cache_dir=cache_dir,
             dtype=torch.float32,
         )
-        print("[Model] Encoder loaded with float32 (frozen, for consistency)")
 
         # Enable gradient checkpointing if configured
         # Note: PyTorch warns "None of the inputs have requires_grad=True" because
@@ -211,26 +208,13 @@ class AesopPolicy(nn.Module, PyTorchModelHubMixin):
                 message="None of the inputs have requires_grad=True",
                 module="torch.utils.checkpoint",
             )
-            print("[Model] Enabling gradient checkpointing for memory efficiency")
             self.base.gradient_checkpointing_enable()
 
         # Apply LoRA if enabled
         # LoRA will automatically freeze original weights and only train adapters
         if use_lora:
-            print(
-                f"[Model] Applying LoRA with r={self.lora_config.r}, alpha={self.lora_config.lora_alpha}"
-            )
-            self.base, adapted_modules = apply_lora_to_model(
+            self.base, _adapted_modules = apply_lora_to_model(
                 self.base, self.lora_config
-            )
-            print(
-                f"[Model] LoRA applied to {len(adapted_modules)} modules: {adapted_modules[:5]}..."
-            )
-
-            # Count parameters
-            trainable, total, pct = count_lora_parameters(self.base)
-            print(
-                f"[Model] LoRA trainable params: {trainable:,} / {total:,} ({pct:.2f}%)"
             )
             # LoRA layers handle freezing internally, no need to freeze_base
         elif freeze_base:
@@ -357,7 +341,6 @@ class AesopPolicy(nn.Module, PyTorchModelHubMixin):
             ]
             raise FileNotFoundError("missing retrieval assets: " + ", ".join(missing))
 
-        print(f"[Model] Loading premise embeddings from {self.cache_dir}")
         embeddings = np.load(emb_path)
         raw_premises = np.load(raw_path, allow_pickle=True)
 
@@ -365,7 +348,6 @@ class AesopPolicy(nn.Module, PyTorchModelHubMixin):
 
         loaded_premises = [Premise.from_leandojo_format(r) for r in raw_premises]
         self._premise_cache = (loaded_premises, embeddings)
-        print(f"[Model] Loaded {len(loaded_premises)} premises from cache (cpu)")
 
         # Load BM25 index for hybrid retrieval if enabled
         if self._use_hybrid:
@@ -421,13 +403,9 @@ class AesopPolicy(nn.Module, PyTorchModelHubMixin):
         """Load BM25 index and initialize hybrid retriever."""
         bm25_path = os.path.join(self.cache_dir, "bm25_index.pkl")
         if not os.path.exists(bm25_path):
-            print(
-                f"[Model] BM25 index not found at {bm25_path}, using dense-only retrieval"
-            )
             self._use_hybrid = False
             return
 
-        print("[Model] Loading BM25 index for hybrid retrieval...")
         bm25_index = BM25Index()
         bm25_index.load(bm25_path)
 
@@ -438,9 +416,6 @@ class AesopPolicy(nn.Module, PyTorchModelHubMixin):
             rrf_k=getattr(config, "HYBRID_RRF_K", 60),
         )
         self._hybrid_retriever.set_bm25_index(bm25_index)
-        print(
-            f"[Model] Hybrid retrieval enabled (method: {self._hybrid_retriever.fusion_method})"
-        )
 
     def retrieve(self, query: str, k: int = None, normalize_scores: bool = True):
         """

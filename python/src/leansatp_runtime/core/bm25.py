@@ -96,10 +96,6 @@ class BM25Index:
             self.idf_cache[term] = math.log((n_docs - df + 0.5) / (df + 0.5) + 1)
 
         self._is_built = True
-        print(
-            f"[BM25] Built index with {len(documents)} documents, "
-            f"{len(self.doc_freqs)} unique terms"
-        )
 
     def score(self, query: str, doc_idx: int) -> float:
         """
@@ -173,7 +169,6 @@ class BM25Index:
         }
         with open(path, "wb") as f:
             pickle.dump(data, f)
-        print(f"[BM25] Saved index to {path}")
 
     def load(self, path: str) -> None:
         """Load BM25 index from disk."""
@@ -188,7 +183,6 @@ class BM25Index:
         self.avg_doc_length = data["avg_doc_length"]
         self.idf_cache = data["idf_cache"]
         self._is_built = True
-        print(f"[BM25] Loaded index from {path} ({len(self.documents)} documents)")
 
 
 class HybridRetriever:
