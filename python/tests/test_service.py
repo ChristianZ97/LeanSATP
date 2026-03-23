@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import sys
 import warnings
@@ -259,13 +260,22 @@ class SATPServiceLifecycleTests(unittest.TestCase):
 
         fake_engine = FakeEngine()
         signal_calls: list[tuple[int, object]] = []
+        server_events: list[str] = []
 
         class FakeServer:
+            engine = None
+
+            def server_bind(self) -> None:
+                server_events.append("bound")
+
+            def server_activate(self) -> None:
+                server_events.append("activated")
+
             def serve_forever(self) -> None:
                 raise KeyboardInterrupt
 
             def server_close(self) -> None:
-                signal_calls.append(("closed", None))
+                server_events.append("closed")
 
         stderr = StringIO()
         with (
@@ -281,9 +291,10 @@ class SATPServiceLifecycleTests(unittest.TestCase):
             ),
             redirect_stderr(stderr),
         ):
-            service.serve(host="127.0.0.1", port=5177)
+            exit_code = service.serve(host="127.0.0.1", port=5177)
 
         output = stderr.getvalue()
+        self.assertEqual(exit_code, 0)
         self.assertIn("INFO     Started server process [", output)
         self.assertIn("INFO     Waiting for application startup.", output)
         self.assertIn(
@@ -305,11 +316,108 @@ class SATPServiceLifecycleTests(unittest.TestCase):
         self.assertIn("INFO     Waiting for application shutdown.", output)
         self.assertIn("INFO     Application shutdown complete.", output)
         self.assertIn("INFO     Finished server process [", output)
+        self.assertEqual(server_events, ["bound", "activated", "closed"])
         self.assertEqual(signal_calls[0][0], service.signal.SIGINT)
         self.assertEqual(signal_calls[1][0], service.signal.SIGTERM)
-        self.assertEqual(signal_calls[2], ("closed", None))
-        self.assertEqual(signal_calls[3], (service.signal.SIGINT, "old-int"))
-        self.assertEqual(signal_calls[4], (service.signal.SIGTERM, "old-term"))
+        self.assertEqual(signal_calls[2], (service.signal.SIGINT, "old-int"))
+        self.assertEqual(signal_calls[3], (service.signal.SIGTERM, "old-term"))
+
+    def test_serve_port_in_use_logs_help_and_exits_cleanly(self) -> None:
+        server_events: list[str] = []
+
+        class FakeServer:
+            engine = None
+
+            def server_bind(self) -> None:
+                server_events.append("bind")
+                raise OSError(errno.EADDRINUSE, "Address already in use")
+
+            def server_close(self) -> None:
+                server_events.append("closed")
+
+        stderr = StringIO()
+        with (
+            patch.object(service, "_SATPHTTPServer", return_value=FakeServer()),
+            patch.object(service, "SATPInferenceEngine") as mock_engine,
+            redirect_stderr(stderr),
+        ):
+            exit_code = service.serve(host="127.0.0.1", port=5177)
+
+        output = stderr.getvalue()
+        self.assertEqual(exit_code, 1)
+        mock_engine.assert_not_called()
+        self.assertIn("INFO     Started server process [", output)
+        self.assertIn("INFO     Waiting for application startup.", output)
+        self.assertIn(
+            "WARNING  [LeanSATP] Port 5177 is already in use on 127.0.0.1.",
+            output,
+        )
+        self.assertIn(
+            "WARNING  [LeanSATP] Another process is already listening on the SATP service port.",
+            output,
+        )
+        self.assertIn(
+            "WARNING  [LeanSATP] If that is an existing SATP server, reuse it instead of starting a second copy.",
+            output,
+        )
+        self.assertIn(
+            "INFO     [LeanSATP] To inspect the current listener: lsof -i :5177",
+            output,
+        )
+        self.assertIn(
+            "INFO     [LeanSATP] To stop it and restart SATP: fuser -k 5177/tcp",
+            output,
+        )
+        self.assertIn("INFO     Waiting for application shutdown.", output)
+        self.assertIn("INFO     Application shutdown complete.", output)
+        self.assertIn("INFO     Finished server process [", output)
+        self.assertNotIn("Traceback", output)
+        self.assertEqual(server_events, ["bind", "closed"])
+
+    def test_serve_missing_checkpoint_logs_help_and_exits_cleanly(self) -> None:
+        server_events: list[str] = []
+
+        class FakeServer:
+            engine = None
+
+            def server_bind(self) -> None:
+                server_events.append("bound")
+
+            def server_close(self) -> None:
+                server_events.append("closed")
+
+        stderr = StringIO()
+        with (
+            patch.object(service, "_SATPHTTPServer", return_value=FakeServer()),
+            patch.object(
+                service,
+                "SATPInferenceEngine",
+                side_effect=FileNotFoundError(
+                    "checkpoint not found: /tmp/cache/best_checkpoint.pt; "
+                    "run ./setup.sh to download it"
+                ),
+            ),
+            redirect_stderr(stderr),
+        ):
+            exit_code = service.serve(host="127.0.0.1", port=5177)
+
+        output = stderr.getvalue()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("INFO     Started server process [", output)
+        self.assertIn("INFO     Waiting for application startup.", output)
+        self.assertIn(
+            "ERROR    [LeanSATP] checkpoint not found: /tmp/cache/best_checkpoint.pt; run ./setup.sh to download it",
+            output,
+        )
+        self.assertIn(
+            "INFO     [LeanSATP] Run ./setup.sh from the repository root to install dependencies, fetch mathlib, and download the checkpoint.",
+            output,
+        )
+        self.assertIn("INFO     Waiting for application shutdown.", output)
+        self.assertIn("INFO     Application shutdown complete.", output)
+        self.assertIn("INFO     Finished server process [", output)
+        self.assertNotIn("Traceback", output)
+        self.assertEqual(server_events, ["bound", "closed"])
 
 
 if __name__ == "__main__":

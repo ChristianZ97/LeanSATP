@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import errno
 import io
 import json
 import os
 import re
 import signal
+import shutil
 import sys
 import textwrap
 import warnings
@@ -17,9 +19,10 @@ from pathlib import Path
 import threading
 from typing import Any, Optional
 
-DEFAULT_CHECKPOINT = "hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt"
+DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
+DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 
 _torch = None
 _config = None
@@ -67,27 +70,62 @@ def _ensure_imports() -> None:
     _config, _AesopPolicy, _to_lean4_string, _LoRAConfig = _c, _AP, _tl, _LC
 
 
-def resolve_checkpoint_path(checkpoint_path: str) -> str:
-    """Resolve hf:// checkpoint paths to a local file."""
+def _parse_hf_checkpoint_source(checkpoint_source: str) -> tuple[str, str]:
+    """Split an hf:// checkpoint source into repo id and filename."""
+    parts = checkpoint_source[len("hf://") :].split("/", 2)
+    if len(parts) != 3:
+        raise ValueError(
+            "hf:// checkpoint paths must look like 'hf://<org>/<repo>/<filename>'"
+        )
+    return f"{parts[0]}/{parts[1]}", parts[2]
+
+
+def _normalize_local_path(path: str) -> Path:
+    """Expand a user-provided local path without requiring it to exist yet."""
+    return Path(path).expanduser().resolve(strict=False)
+
+
+def ensure_local_checkpoint(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str:
+    """Require a local checkpoint file to exist before starting inference."""
     if checkpoint_path.startswith("hf://"):
+        raise FileNotFoundError(
+            "checkpoint path must be a local file, not an hf:// URI; "
+            "run ./setup.sh to download the checkpoint first"
+        )
+
+    resolved = _normalize_local_path(checkpoint_path)
+    if not resolved.exists():
+        raise FileNotFoundError(
+            f"checkpoint not found: {resolved}; run ./setup.sh to download it"
+        )
+    if not resolved.is_file():
+        raise FileNotFoundError(f"checkpoint path is not a file: {resolved}")
+    return str(resolved)
+
+
+def ensure_checkpoint_download(
+    checkpoint_path: str = DEFAULT_CHECKPOINT,
+    checkpoint_source: str = DEFAULT_CHECKPOINT_SOURCE,
+) -> str:
+    """Download the SATP checkpoint into an explicit local cache path."""
+    destination = _normalize_local_path(checkpoint_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if checkpoint_source.startswith("hf://"):
         from huggingface_hub import hf_hub_download
 
-        parts = checkpoint_path[len("hf://") :].split("/", 2)
-        if len(parts) != 3:
-            raise ValueError(
-                "hf:// checkpoint paths must look like 'hf://<org>/<repo>/<filename>'"
-            )
-        repo_id = f"{parts[0]}/{parts[1]}"
-        filename = parts[2]
+        repo_id, filename = _parse_hf_checkpoint_source(checkpoint_source)
         with _suppress_startup_noise():
-            return hf_hub_download(repo_id=repo_id, filename=filename)
+            downloaded = Path(hf_hub_download(repo_id=repo_id, filename=filename))
+    else:
+        downloaded = _normalize_local_path(checkpoint_source)
+        if not downloaded.exists() or not downloaded.is_file():
+            raise FileNotFoundError(f"checkpoint source not found: {downloaded}")
 
-    return checkpoint_path
+    if downloaded.resolve() != destination.resolve():
+        shutil.copy2(downloaded, destination)
 
-
-def ensure_checkpoint_download(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str:
-    """Download the SATP checkpoint eagerly if needed."""
-    return resolve_checkpoint_path(checkpoint_path)
+    return str(destination)
 
 
 def preferred_device() -> str:
@@ -229,7 +267,7 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
     """Load the LeanSATP policy model once and keep it resident."""
     _ensure_imports()
 
-    checkpoint_path = resolve_checkpoint_path(checkpoint_path)
+    checkpoint_path = ensure_local_checkpoint(checkpoint_path)
     device = device or preferred_device()
 
     ckpt = _torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -643,9 +681,57 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
 
 
 class _SATPHTTPServer(ThreadingHTTPServer):
-    def __init__(self, server_address, engine: SATPInferenceEngine):
-        super().__init__(server_address, _SATPRequestHandler)
+    def __init__(
+        self,
+        server_address,
+        engine: SATPInferenceEngine | None = None,
+        *,
+        bind_and_activate: bool = True,
+    ):
+        super().__init__(
+            server_address,
+            _SATPRequestHandler,
+            bind_and_activate=bind_and_activate,
+        )
         self.engine = engine
+
+
+def _is_address_in_use(exc: BaseException) -> bool:
+    """Return true when a socket bind failed because the port is occupied."""
+    return isinstance(exc, OSError) and exc.errno == errno.EADDRINUSE
+
+
+def _log_port_in_use_help(host: str, port: int) -> None:
+    """Explain how to recover when the SATP service port is already occupied."""
+    log_service(
+        "WARNING",
+        f"[LeanSATP] Port {port} is already in use on {host}.",
+    )
+    log_service(
+        "WARNING",
+        "[LeanSATP] Another process is already listening on the SATP service port.",
+    )
+    log_service(
+        "WARNING",
+        "[LeanSATP] If that is an existing SATP server, reuse it instead of starting a second copy.",
+    )
+    log_service(
+        "INFO",
+        f"[LeanSATP] To inspect the current listener: lsof -i :{port}",
+    )
+    log_service(
+        "INFO",
+        f"[LeanSATP] To stop it and restart SATP: fuser -k {port}/tcp",
+    )
+
+
+def _log_missing_checkpoint_help(exc: FileNotFoundError) -> None:
+    """Explain how to recover when the local checkpoint is missing."""
+    log_service("ERROR", f"[LeanSATP] {exc}")
+    log_service(
+        "INFO",
+        "[LeanSATP] Run ./setup.sh from the repository root to install dependencies, fetch mathlib, and download the checkpoint.",
+    )
 
 
 def serve(
@@ -654,38 +740,61 @@ def serve(
     port: int,
     checkpoint_path: str = DEFAULT_CHECKPOINT,
     cache_dir: str = DEFAULT_CACHE_DIR,
-) -> None:
+) -> int:
     """Start the resident LeanSATP HTTP service."""
     pid = os.getpid()
+    server: _SATPHTTPServer | None = None
+    previous_sigint = None
+    previous_sigterm = None
+    exit_code = 0
+
     log_service("INFO", f"Started server process [{pid}]")
     log_service("INFO", "Waiting for application startup.")
-    engine = SATPInferenceEngine(
-        checkpoint_path=checkpoint_path,
-        cache_dir=cache_dir,
-    )
-    server = _SATPHTTPServer((host, port), engine)
-    previous_sigint = signal.getsignal(signal.SIGINT)
-    previous_sigterm = signal.getsignal(signal.SIGTERM)
-    signal.signal(signal.SIGINT, _interrupt_service)
-    signal.signal(signal.SIGTERM, _interrupt_service)
-    log_service("INFO", engine.summary())
-    log_service("INFO", "Application startup complete.")
-    log_service(
-        "INFO",
-        f"LeanSATP service running on http://{host}:{port} (Press CTRL+C to quit)",
-    )
-    log_service("INFO", render_try_me_message(host, port))
     try:
+        server = _SATPHTTPServer((host, port), bind_and_activate=False)
+        server.server_bind()
+
+        engine = SATPInferenceEngine(
+            checkpoint_path=checkpoint_path,
+            cache_dir=cache_dir,
+        )
+        server.engine = engine
+        server.server_activate()
+
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, _interrupt_service)
+        signal.signal(signal.SIGTERM, _interrupt_service)
+        log_service("INFO", engine.summary())
+        log_service("INFO", "Application startup complete.")
+        log_service(
+            "INFO",
+            f"LeanSATP service running on http://{host}:{port} (Press CTRL+C to quit)",
+        )
+        log_service("INFO", render_try_me_message(host, port))
         server.serve_forever()
     except KeyboardInterrupt:
         log_service("INFO", "Shutting down")
+    except FileNotFoundError as exc:
+        _log_missing_checkpoint_help(exc)
+        exit_code = 1
+    except OSError as exc:
+        if _is_address_in_use(exc):
+            _log_port_in_use_help(host, port)
+            exit_code = 1
+        else:
+            raise
     finally:
         log_service("INFO", "Waiting for application shutdown.")
-        server.server_close()
-        signal.signal(signal.SIGINT, previous_sigint)
-        signal.signal(signal.SIGTERM, previous_sigterm)
+        if server is not None:
+            server.server_close()
+        if previous_sigint is not None:
+            signal.signal(signal.SIGINT, previous_sigint)
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
         log_service("INFO", "Application shutdown complete.")
         log_service("INFO", f"Finished server process [{pid}]")
+    return exit_code
 
 
 def _parse_args() -> argparse.Namespace:
@@ -693,6 +802,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5177)
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
+    parser.add_argument("--checkpoint-source", default=DEFAULT_CHECKPOINT_SOURCE)
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--download-only", action="store_true")
@@ -703,18 +813,17 @@ def main() -> int:
     args = _parse_args()
 
     if args.download_only:
-        resolved = ensure_checkpoint_download(args.checkpoint)
+        resolved = ensure_checkpoint_download(args.checkpoint, args.checkpoint_source)
         print(json.dumps({"ok": True, "checkpoint_path": resolved}))
         return 0
 
     if args.serve:
-        serve(
+        return serve(
             host=args.host,
             port=args.port,
             checkpoint_path=args.checkpoint,
             cache_dir=args.cache_dir,
         )
-        return 0
 
     log_service("ERROR", "Use --serve or --download-only")
     return 1
