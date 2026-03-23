@@ -1,4 +1,4 @@
-"""Tests for LeanSATP service device fallback behavior."""
+"""Tests for LeanSATP server device fallback behavior."""
 
 from __future__ import annotations
 
@@ -233,7 +233,7 @@ class SATPHTTPServerSmokeTests(unittest.TestCase):
         self.assertIn("INFO     ← response 200 POST /infer", stderr.getvalue())
 
 
-class SATPServiceLifecycleTests(unittest.TestCase):
+class SATPServerLifecycleTests(unittest.TestCase):
     def test_suppress_startup_noise_hides_library_chatter(self) -> None:
         stdout = StringIO()
         stderr = StringIO()
@@ -255,7 +255,9 @@ class SATPServiceLifecycleTests(unittest.TestCase):
             def summary(self) -> str:
                 return (
                     "SATP inference engine initialized with: "
-                    "PREFERRED_DEVICE=cuda, ACTIVE_DEVICE=cpu, RETRIEVAL=disabled"
+                    "PREFERRED_DEVICE=[bold]cuda[/bold], "
+                    "ACTIVE_DEVICE=[bold]cpu[/bold], "
+                    "RETRIEVAL=[bold]disabled[/bold]"
                 )
 
         fake_engine = FakeEngine()
@@ -298,15 +300,12 @@ class SATPServiceLifecycleTests(unittest.TestCase):
         self.assertIn("INFO     Started server process [", output)
         self.assertIn("INFO     Waiting for application startup.", output)
         self.assertIn(
-            "INFO     SATP inference engine initialized with: "
-            "PREFERRED_DEVICE=cuda, ACTIVE_DEVICE=cpu, RETRIEVAL=disabled",
+            "SATP inference engine initialized with:",
             output,
         )
         self.assertIn("INFO     Application startup complete.", output)
-        self.assertIn(
-            "INFO     LeanSATP service running on http://127.0.0.1:5177",
-            output,
-        )
+        self.assertIn("LeanSATP Server", output)
+        self.assertIn("http://127.0.0.1:5177", output)
         self.assertIn("INFO     Try me with:", output)
         self.assertIn("curl --request POST \\", output)
         self.assertIn("--url http://localhost:5177/infer \\", output)
@@ -353,7 +352,7 @@ class SATPServiceLifecycleTests(unittest.TestCase):
             output,
         )
         self.assertIn(
-            "WARNING  [LeanSATP] Another process is already listening on the SATP service port.",
+            "WARNING  [LeanSATP] Another process is already listening on the SATP server port.",
             output,
         )
         self.assertIn(

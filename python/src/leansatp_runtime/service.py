@@ -1,4 +1,4 @@
-"""PyTorch-backed SATP inference service."""
+"""PyTorch-backed SATP inference server."""
 
 from __future__ import annotations
 
@@ -180,7 +180,7 @@ def _ensure_rich() -> None:
 
 @contextmanager
 def _suppress_startup_noise():
-    """Hide third-party model-loading chatter during service startup."""
+    """Hide third-party model-loading chatter during server startup."""
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     with (
@@ -240,14 +240,14 @@ def _make_console(stream):
     )
 
 
-def log_service(
+def log_server(
     level: str,
     message: str,
     *,
     stream=None,
     enable_color: bool | None = None,
 ) -> None:
-    """Emit Kimina-style prefixed logs from the SATP service."""
+    """Emit Kimina-style prefixed logs from the SATP server."""
     stream = stream or sys.stderr
     if enable_color is None:
         enable_color = _supports_color(stream)
@@ -276,7 +276,7 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
     if calib_key in state_dict:
         ckpt_lemma_k = state_dict[calib_key].shape[0]
         if ckpt_lemma_k != _config.LEMMA_K:
-            log_service(
+            log_server(
                 "INFO",
                 f"[LeanSATP] Overriding LEMMA_K: {_config.LEMMA_K} -> {ckpt_lemma_k}",
             )
@@ -308,7 +308,7 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
         retrieval_enabled = True
     except FileNotFoundError as exc:
         retrieval_enabled = False
-        log_service(
+        log_server(
             "INFO",
             f"[LeanSATP] Retrieval disabled: {exc}",
         )
@@ -325,9 +325,15 @@ def _sanitize_name(name: str, index: int) -> str:
     return cleaned
 
 
-def build_formal_statement(goal: str, hypotheses: list[dict[str, str]]) -> str:
+def build_formal_statement(
+    goal: str,
+    hypotheses: list[dict[str, str]],
+    *,
+    name: str | None = None,
+) -> str:
     """Convert the current Lean goal state into a theorem-like prompt."""
-    lines = ["theorem satp_goal"]
+    thm_name = _sanitize_name(name or "", 0) if name else "satp_goal"
+    lines = [f"theorem {thm_name}"]
     for i, hyp in enumerate(hypotheses):
         name = _sanitize_name(hyp.get("name", ""), i)
         hyp_type = (hyp.get("type", "") or "").strip()
@@ -379,7 +385,7 @@ def print_full_proof_trace(
     _ensure_rich()
     if enable_color and _RichConsole and _RichSyntax:
         console = _make_console(stream)
-        log_service(
+        log_server(
             "INFO",
             f"[bold magenta][LeanSATP] Full proof[/bold magenta] "
             f"([bold yellow]{device}[/bold yellow]):",
@@ -413,7 +419,7 @@ def _curl_example_host(host: str) -> str:
 
 
 def render_try_me_message(host: str, port: int) -> str:
-    """Render a Kimina-style curl hint for manual service checks."""
+    """Render a Kimina-style curl hint for manual server checks."""
     curl_host = _curl_example_host(host)
     return "Try me with:\n" + textwrap.indent(
         "curl --request POST \\\n"
@@ -424,7 +430,7 @@ def render_try_me_message(host: str, port: int) -> str:
     )
 
 
-def _interrupt_service(_signum, _frame) -> None:
+def _interrupt_server(_signum, _frame) -> None:
     """Convert termination signals into the same clean shutdown path as Ctrl+C."""
     raise KeyboardInterrupt
 
@@ -544,7 +550,7 @@ class SATPInferenceEngine:
         if self._downgrade_logged:
             return
         summary = short_error_summary(exc)
-        log_service(
+        log_server(
             "WARNING",
             f"[LeanSATP] Warning: falling back from cuda to cpu during {stage}: {summary}",
         )
@@ -592,9 +598,10 @@ class SATPInferenceEngine:
         hypotheses: Optional[list[dict[str, str]]] = None,
         user_lemmas: Optional[list[str]] = None,
         tactic_name: str = "aesop",
+        name: str | None = None,
     ) -> dict[str, Any]:
         hypotheses = hypotheses or []
-        formal_statement = build_formal_statement(goal, hypotheses)
+        formal_statement = build_formal_statement(goal, hypotheses, name=name)
         with self._lock:
             try:
                 tactic = policy_tactic(
@@ -624,9 +631,9 @@ class SATPInferenceEngine:
         retrieval = "enabled" if self.retrieval_enabled else "disabled"
         return (
             "SATP inference engine initialized with: "
-            f"PREFERRED_DEVICE={self.preferred_device}, "
-            f"ACTIVE_DEVICE={self.active_device}, "
-            f"RETRIEVAL={retrieval}"
+            f"PREFERRED_DEVICE=[bold]{self.preferred_device}[/bold], "
+            f"ACTIVE_DEVICE=[bold]{self.active_device}[/bold], "
+            f"RETRIEVAL=[bold]{retrieval}[/bold]"
         )
 
 
@@ -643,10 +650,11 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-        log_service("INFO", f"← response {status} {self.command} {self.path}")
+        log_server("INFO", f"← response {status} {self.command} {self.path}")
 
-    def _log_request_start(self) -> None:
-        log_service("INFO", f"→ request {self.command} {self.path}")
+    def _log_request_start(self, detail: str = "") -> None:
+        suffix = f" [bold magenta]{detail}[/bold magenta]" if detail else ""
+        log_server("INFO", f"→ request {self.command} {self.path}{suffix}")
 
     def do_GET(self) -> None:
         self._log_request_start()
@@ -656,8 +664,8 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
         self._write_json(200, {"ok": True})
 
     def do_POST(self) -> None:
-        self._log_request_start()
         if self.path != "/infer":
+            self._log_request_start()
             self._write_json(404, {"ok": False, "error": "not found"})
             return
 
@@ -669,11 +677,15 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
             if not goal or not isinstance(goal, str):
                 raise ValueError("request body must contain string field 'goal'")
 
+            name = payload.get("name") or None
+            self._log_request_start(name or goal)
+
             result = self.server.engine.infer(
                 goal=goal,
                 hypotheses=payload.get("hypotheses") or [],
                 user_lemmas=payload.get("user_lemmas") or [],
                 tactic_name=payload.get("tactic_name", "aesop"),
+                name=name,
             )
             self._write_json(200, {"ok": True, **result})
         except Exception as exc:
@@ -702,24 +714,24 @@ def _is_address_in_use(exc: BaseException) -> bool:
 
 
 def _log_port_in_use_help(host: str, port: int) -> None:
-    """Explain how to recover when the SATP service port is already occupied."""
-    log_service(
+    """Explain how to recover when the SATP server port is already occupied."""
+    log_server(
         "WARNING",
         f"[LeanSATP] Port {port} is already in use on {host}.",
     )
-    log_service(
+    log_server(
         "WARNING",
-        "[LeanSATP] Another process is already listening on the SATP service port.",
+        "[LeanSATP] Another process is already listening on the SATP server port.",
     )
-    log_service(
+    log_server(
         "WARNING",
         "[LeanSATP] If that is an existing SATP server, reuse it instead of starting a second copy.",
     )
-    log_service(
+    log_server(
         "INFO",
         f"[LeanSATP] To inspect the current listener: lsof -i :{port}",
     )
-    log_service(
+    log_server(
         "INFO",
         f"[LeanSATP] To stop it and restart SATP: fuser -k {port}/tcp",
     )
@@ -727,8 +739,8 @@ def _log_port_in_use_help(host: str, port: int) -> None:
 
 def _log_missing_checkpoint_help(exc: FileNotFoundError) -> None:
     """Explain how to recover when the local checkpoint is missing."""
-    log_service("ERROR", f"[LeanSATP] {exc}")
-    log_service(
+    log_server("ERROR", f"[LeanSATP] {exc}")
+    log_server(
         "INFO",
         "[LeanSATP] Run ./setup.sh from the repository root to install dependencies, fetch mathlib, and download the checkpoint.",
     )
@@ -741,15 +753,15 @@ def serve(
     checkpoint_path: str = DEFAULT_CHECKPOINT,
     cache_dir: str = DEFAULT_CACHE_DIR,
 ) -> int:
-    """Start the resident LeanSATP HTTP service."""
+    """Start the resident LeanSATP HTTP server."""
     pid = os.getpid()
     server: _SATPHTTPServer | None = None
     previous_sigint = None
     previous_sigterm = None
     exit_code = 0
 
-    log_service("INFO", f"Started server process [{pid}]")
-    log_service("INFO", "Waiting for application startup.")
+    log_server("INFO", f"Started server process [{pid}]")
+    log_server("INFO", "Waiting for application startup.")
     try:
         server = _SATPHTTPServer((host, port), bind_and_activate=False)
         server.server_bind()
@@ -763,18 +775,18 @@ def serve(
 
         previous_sigint = signal.getsignal(signal.SIGINT)
         previous_sigterm = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGINT, _interrupt_service)
-        signal.signal(signal.SIGTERM, _interrupt_service)
-        log_service("INFO", engine.summary())
-        log_service("INFO", "Application startup complete.")
-        log_service(
+        signal.signal(signal.SIGINT, _interrupt_server)
+        signal.signal(signal.SIGTERM, _interrupt_server)
+        log_server("INFO", engine.summary())
+        log_server("INFO", "Application startup complete.")
+        log_server(
             "INFO",
-            f"LeanSATP service running on http://{host}:{port} (Press CTRL+C to quit)",
+            f"Running [bold]LeanSATP Server[/bold] on [bold]http://{host}:{port}[/bold] (Press CTRL+C to quit)",
         )
-        log_service("INFO", render_try_me_message(host, port))
+        log_server("INFO", render_try_me_message(host, port))
         server.serve_forever()
     except KeyboardInterrupt:
-        log_service("INFO", "Shutting down")
+        log_server("INFO", "Shutting down")
     except FileNotFoundError as exc:
         _log_missing_checkpoint_help(exc)
         exit_code = 1
@@ -785,20 +797,20 @@ def serve(
         else:
             raise
     finally:
-        log_service("INFO", "Waiting for application shutdown.")
+        log_server("INFO", "Waiting for application shutdown.")
         if server is not None:
             server.server_close()
         if previous_sigint is not None:
             signal.signal(signal.SIGINT, previous_sigint)
         if previous_sigterm is not None:
             signal.signal(signal.SIGTERM, previous_sigterm)
-        log_service("INFO", "Application shutdown complete.")
-        log_service("INFO", f"Finished server process [{pid}]")
+        log_server("INFO", "Application shutdown complete.")
+        log_server("INFO", f"Finished server process [{pid}]")
     return exit_code
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="LeanSATP inference service")
+    parser = argparse.ArgumentParser(description="LeanSATP inference server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5177)
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
@@ -825,7 +837,7 @@ def main() -> int:
             cache_dir=args.cache_dir,
         )
 
-    log_service("ERROR", "Use --serve or --download-only")
+    log_server("ERROR", "Use --serve or --download-only")
     return 1
 
 

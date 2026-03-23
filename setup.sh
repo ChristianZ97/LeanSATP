@@ -13,6 +13,9 @@ echo "[LeanSATP] Syncing Python environment with uv..."
 uv sync
 
 echo "[LeanSATP] Fetching Lean dependencies with lake update..."
+# Pre-create ProofWidgets build dir so mathlib's post-update hook can prune
+# without error (needed when mathlib is resolved from a local path).
+mkdir -p .lake/packages/proofwidgets/.lake/build/lib
 lake update
 
 echo "[LeanSATP] Downloading checkpoint into $CHECKPOINT_PATH ..."
