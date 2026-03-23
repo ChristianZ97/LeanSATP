@@ -53,7 +53,7 @@ example : True := by
   satp
 ```
 
-On first import, LeanSATP automatically downloads the checkpoint `ChristianZ97/SATP-aesop-policy` from Hugging Face. Internet access is required for this step.
+From the standalone repository root, run `./setup.sh` once to install Python dependencies, fetch Mathlib, and download the SATP checkpoint into the explicit `cache/` directory. The inference service expects a local checkpoint file and does not auto-download it at startup.
 
 If CUDA is visible but unusable on the current machine, the inference service automatically downgrades itself to CPU and continues serving requests. This fallback happens both during startup and during inference, and once the service has downgraded it stays on CPU for the rest of the process lifetime. This keeps `satp` on the SATP path instead of failing over to plain `aesop` for GPU compatibility issues.
 
@@ -64,7 +64,7 @@ LeanSATP has two runtime layers:
 - **Lean**: Lean `v4.26.0`, Mathlib `v4.26.0`, and `import Mathlib` in any file that uses `satp` (the tactic pool requires Mathlib tactics).
 - **Python**: either [`uv`](https://docs.astral.sh/uv/) on your `PATH`, or a Python `>=3.10` environment with the dependencies from this repository's [pyproject.toml](pyproject.toml).
 
-The recommended path is to install `uv`. LeanSATP will then provision its Python runtime on first use via `uv run`.
+The recommended path is to install `uv`, then run `./setup.sh` from the repository root.
 
 If you do not want to use `uv`, install the runtime manually from the copied dependency folder inside your project:
 
@@ -76,7 +76,7 @@ python3 -m pip install -e .
 
 ## Starting SATP
 
-There are two ways to start SATP:
+There are two ways to start SATP after `./setup.sh` has completed:
 
 - **Recommended: start the SATP server manually first.** This avoids the first-use cold-start timeout and lets you see the generated proof sketch in the service terminal.
 - **On-demand: let `satp` start it automatically.** If no SATP server is running, the Lean wrapper will try to launch one in the background. If that launch fails, or if the service later fails to answer, `satp` logs a warning and falls back to plain `aesop`.
@@ -91,8 +91,9 @@ Because the model checkpoint takes several seconds to load, **start the inferenc
 
 ```bash
 cd /path/to/LeanSATP   # or .lake/packages/LeanSATP if used as a dependency
+./setup.sh
 uv run -m leansatp_runtime.service --serve \
-  --checkpoint hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt \
+  --checkpoint cache/best_checkpoint.pt \
   --cache-dir cache/ \
   --host 127.0.0.1 \
   --port 5177
@@ -108,7 +109,7 @@ If you want to force CPU explicitly, prefix the command with `CUDA_VISIBLE_DEVIC
 
 ```bash
 CUDA_VISIBLE_DEVICES= uv run -m leansatp_runtime.service --serve \
-  --checkpoint hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt \
+  --checkpoint cache/best_checkpoint.pt \
   --cache-dir cache/ \
   --host 127.0.0.1 \
   --port 5177
@@ -126,8 +127,9 @@ If you are using LeanSATP through another Lean project, run the same command fro
 
 ```bash
 cd .lake/packages/LeanSATP
+./setup.sh
 uv run -m leansatp_runtime.service --serve \
-  --checkpoint hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt \
+  --checkpoint cache/best_checkpoint.pt \
   --cache-dir cache/ \
   --host 127.0.0.1 \
   --port 5177
@@ -141,6 +143,7 @@ The automatic path is convenient, but it has two limitations:
 
 - the first cold start can take long enough to hit the Lean-side timeout
 - you do not see the SATP service logs unless you start it manually yourself
+- it assumes `./setup.sh` has already populated the local checkpoint and Lean dependencies
 
 So the exact behavior is:
 
@@ -183,8 +186,8 @@ The syntax for invoking the `satp` tactic is `by satp [lemmas]`. The `lemmas` ar
 
 LeanSATP supports an optional runtime retrieval mode.
 
-- **Checkpoint-only mode** (default): LeanSATP downloads the SATP checkpoint from Hugging Face and runs even if no retrieval assets are present.
-- **Runtime retrieval mode**: enabled automatically when the local cache directory contains retrieval assets. LeanSATP does **not** currently auto-download or build retrieval assets. If you want runtime retrieval, you must provide the cache files yourself. The runtime looks for:
+- **Checkpoint-only mode** (default): LeanSATP runs from the local checkpoint installed by `./setup.sh`, even if no retrieval assets are present.
+- **Runtime retrieval mode**: enabled automatically when the local cache directory contains retrieval assets. LeanSATP does **not** currently auto-download or build retrieval assets. If you want runtime retrieval, put the cache files in the same explicit cache directory as the checkpoint. The runtime looks for:
     - `premise_embeddings.npy`
     - `premises_raw.npy`
     - `bm25_index.pkl` (optional; used only for hybrid retrieval)
@@ -196,14 +199,9 @@ If `premise_embeddings.npy` and `premises_raw.npy` are absent, LeanSATP falls ba
 
 If `satp` logs a fallback warning, the message describes the specific failure:
 
-- **No Python runtime found**: install `uv` with `curl -LsSf https://astral.sh/uv/install.sh | sh`, then run `uv sync`.
-- **Service failed to spawn**: run `uv sync` inside the LeanSATP package directory to reinstall dependencies.
+- **No Python runtime found**: install `uv` with `curl -LsSf https://astral.sh/uv/install.sh | sh`, then run `./setup.sh`.
+- **Service failed to spawn**: run `./setup.sh` inside the LeanSATP package directory to reinstall dependencies and fetch Mathlib.
+- **Missing checkpoint**: run `./setup.sh` to download `cache/best_checkpoint.pt`.
 - **Service did not respond (timeout)**: the model is still loading. Start the service manually in a separate terminal (see [Manual Startup](#manual-startup)) and wait until it is ready before invoking `satp`. Also check for a port conflict with `lsof -i :5177`.
 - **CUDA/device compatibility errors**: LeanSATP now auto-downgrades to CPU when CUDA is visible but unusable. To force CPU from the start, run the service with `CUDA_VISIBLE_DEVICES=`.
 - **Want to inspect what SATP actually generated**: start the service manually and watch its terminal. Successful requests print the full proof sketch that LeanSATP is about to execute.
-
-You can disable the import-time checkpoint download by setting the environment variable:
-
-```text
-SATP_SKIP_IMPORT_DOWNLOAD=1
-```

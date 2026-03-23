@@ -6,9 +6,6 @@ open System (FilePath)
 
 namespace LeanSATP
 
-private def defaultCheckpoint : String :=
-  "hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt"
-
 private def defaultServerHost : String := "127.0.0.1"
 private def defaultServerPort : Nat := 5177
 private def defaultRequestTimeout : Nat := 30
@@ -42,6 +39,9 @@ private def defaultRepoRoot : IO FilePath := do
 private def defaultCacheDir : IO String := do
   return (((← defaultRepoRoot) / "cache").normalize.toString)
 
+private def defaultCheckpointFromCacheDir (cacheDir : String) : String :=
+  ((FilePath.mk cacheDir) / "best_checkpoint.pt").normalize.toString
+
 structure RuntimeConfig where
   repoRoot : FilePath
   cacheDir : String
@@ -52,15 +52,21 @@ structure ServiceRunner where
   cmd : String
   args : Array String
 
-private def envOrDefault (key fallback : String) : IO String := do
-  return (← IO.getEnv key).getD fallback
-
 private def runtimeConfigFromEnv : IO RuntimeConfig := do
   let repoRoot ← defaultRepoRoot
+  let cacheDirDefault ← defaultCacheDir
+  let checkpointEnv? ← IO.getEnv "SATP_CHECKPOINT"
+  let cacheDir ←
+    match (← IO.getEnv "SATP_CACHE_DIR"), checkpointEnv? with
+    | some value, _ => pure value
+    | none, some checkpoint =>
+        let checkpointPath := FilePath.mk checkpoint
+        pure ((checkpointPath.parent.getD (FilePath.mk cacheDirDefault)).normalize.toString)
+    | none, none => pure cacheDirDefault
   return {
     repoRoot := repoRoot
-    cacheDir := ← envOrDefault "SATP_CACHE_DIR" (← defaultCacheDir)
-    checkpoint := defaultCheckpoint
+    cacheDir := cacheDir
+    checkpoint := checkpointEnv?.getD (defaultCheckpointFromCacheDir cacheDir)
   }
 
 private def serviceModuleArgs (cfg : RuntimeConfig) (mode : String) : Array String :=
@@ -113,7 +119,7 @@ private def describeRunner (runner : ServiceRunner) : String :=
 private def pythonEnvironmentMessage (cfg : RuntimeConfig) : MessageData :=
   m!"satp: no Python runtime found under {cfg.repoRoot}\n" ++
   m!"  • Install uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh\n" ++
-  m!"  • Then run: uv sync  (installs dependencies and downloads checkpoint)"
+  m!"  • Then run: ./setup.sh  (installs Python deps, fetches mathlib, downloads checkpoint)"
 
 private def healthUrl : String :=
   s!"http://{defaultServerHost}:{defaultServerPort}/health"
@@ -224,7 +230,7 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
   catch _ =>
     return .error (m!"satp: failed to start inference service\n" ++
       m!"  • Command: {describeRunner runner}\n" ++
-      m!"  • Try running `uv sync` in {cfg.repoRoot} to reinstall dependencies")
+      m!"  • Try running `./setup.sh` in {cfg.repoRoot}")
   let ready : Bool ← liftM (m := IO) waitForServer
   if ready then
     return .ok ()
@@ -232,9 +238,9 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
     m!"satp: inference service did not respond (timeout after 20s)\n" ++
     m!"  • Service command: {describeRunner runner}\n" ++
     m!"  • Possible causes:\n" ++
-    m!"    1. Missing checkpoint — run: uv sync\n" ++
+    m!"    1. Missing checkpoint — run: ./setup.sh\n" ++
     m!"    2. Checkpoint path mismatch — expected: {cfg.checkpoint}\n" ++
-    m!"    3. Missing Python deps — run: uv sync\n" ++
+    m!"    3. Missing Python deps or mathlib deps — run: ./setup.sh\n" ++
     m!"    4. Port conflict — check if port 5177 is in use: lsof -i :5177")
 
 
@@ -314,33 +320,6 @@ private def runSatpWithFallback (cfg : RuntimeConfig) (lemmaNames : Array String
       match ← evalReturnedTactic tacticString with
       | .ok () => pure ()
       | .error reason => fallbackToDefaultAesop reason
-
-private def bestEffortDownloadOnImport : IO Unit := do
-  if (← IO.getEnv "SATP_SKIP_IMPORT_DOWNLOAD").isSome then
-    return
-  let cfg ← runtimeConfigFromEnv
-  unless (← cfg.repoRoot.pathExists) do
-    IO.eprintln s!"[LeanSATP] Skipping checkpoint prefetch; repo root not found: {cfg.repoRoot}"
-    return
-  let runner? ← pickServiceRunner cfg "--download-only"
-  let some runner := runner?
-    | return
-  try
-    let _ ← IO.Process.spawn {
-      cmd := runner.cmd
-      args := runner.args
-      cwd := some cfg.repoRoot
-      stdin := .null
-      stdout := .null
-      stderr := .null
-      setsid := true
-    }
-    pure ()
-  catch _ =>
-    pure ()
-
-initialize
-  discard <| bestEffortDownloadOnImport
 
 syntax (name := satp) "satp" (ppSpace "[" (term),* "]")? : tactic
 
