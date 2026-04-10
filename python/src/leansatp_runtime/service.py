@@ -468,6 +468,7 @@ def policy_tactic(
     *,
     tactic_name: str = "aesop",
     user_lemmas: Optional[list[str]] = None,
+    user_lemma_priority: Optional[int] = None,
 ) -> str:
     """Generate a LeanSATP tactic by greedy policy inference."""
     _ensure_imports()
@@ -526,7 +527,10 @@ def policy_tactic(
         config_binary_actions=config_binary,
         tactic_name=tactic_name,
     )
-    return append_user_lemmas(tactic, user_lemmas)
+    kwargs: dict = {}
+    if user_lemma_priority is not None:
+        kwargs["priority_pct"] = user_lemma_priority
+    return append_user_lemmas(tactic, user_lemmas, **kwargs)
 
 
 class SATPInferenceEngine:
@@ -598,6 +602,7 @@ class SATPInferenceEngine:
         hypotheses: Optional[list[dict[str, str]]] = None,
         user_lemmas: Optional[list[str]] = None,
         tactic_name: str = "aesop",
+        user_lemma_priority: Optional[int] = None,
         name: str | None = None,
     ) -> dict[str, Any]:
         hypotheses = hypotheses or []
@@ -609,6 +614,7 @@ class SATPInferenceEngine:
                     formal_statement,
                     tactic_name=tactic_name,
                     user_lemmas=user_lemmas,
+                    user_lemma_priority=user_lemma_priority,
                 )
             except Exception as exc:
                 if self.active_device != "cuda" or not is_cuda_failure(exc):
@@ -619,6 +625,7 @@ class SATPInferenceEngine:
                     formal_statement,
                     tactic_name=tactic_name,
                     user_lemmas=user_lemmas,
+                    user_lemma_priority=user_lemma_priority,
                 )
             self._log_inference_trace(formal_statement, tactic)
         return {
@@ -685,6 +692,7 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
                 hypotheses=payload.get("hypotheses") or [],
                 user_lemmas=payload.get("user_lemmas") or [],
                 tactic_name=payload.get("tactic_name", "aesop"),
+                user_lemma_priority=payload.get("user_lemma_priority"),
                 name=name,
             )
             self._write_json(200, {"ok": True, **result})
