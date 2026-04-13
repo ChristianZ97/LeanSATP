@@ -598,15 +598,22 @@ class SATPInferenceEngine:
     def infer(
         self,
         *,
-        goal: str,
+        goal: str = "",
         hypotheses: Optional[list[dict[str, str]]] = None,
+        formal_statement: str | None = None,
         user_lemmas: Optional[list[str]] = None,
         tactic_name: str = "aesop",
         user_lemma_priority: Optional[int] = None,
         name: str | None = None,
     ) -> dict[str, Any]:
-        hypotheses = hypotheses or []
-        formal_statement = build_formal_statement(goal, hypotheses, name=name)
+        formal_statement = (formal_statement or "").strip()
+        if not formal_statement:
+            hypotheses = hypotheses or []
+            if not goal or not isinstance(goal, str):
+                raise ValueError(
+                    "infer requires non-empty formal_statement or goal"
+                )
+            formal_statement = build_formal_statement(goal, hypotheses, name=name)
         with self._lock:
             try:
                 tactic = policy_tactic(
@@ -680,16 +687,29 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length)
             payload = json.loads(raw.decode("utf-8"))
+            formal_statement = payload.get("formal_statement") or ""
+            if formal_statement and not isinstance(formal_statement, str):
+                raise ValueError(
+                    "request field 'formal_statement' must be a string when provided"
+                )
+
             goal = payload.get("goal", "")
-            if not goal or not isinstance(goal, str):
-                raise ValueError("request body must contain string field 'goal'")
+            if goal and not isinstance(goal, str):
+                raise ValueError("request field 'goal' must be a string when provided")
+
+            if not formal_statement and not goal:
+                raise ValueError(
+                    "request body must contain string field 'formal_statement' or 'goal'"
+                )
 
             name = payload.get("name") or None
-            self._log_request_start(name or goal)
+            detail = name or goal or formal_statement.splitlines()[0]
+            self._log_request_start(detail)
 
             result = self.server.engine.infer(
                 goal=goal,
                 hypotheses=payload.get("hypotheses") or [],
+                formal_statement=formal_statement,
                 user_lemmas=payload.get("user_lemmas") or [],
                 tactic_name=payload.get("tactic_name", "aesop"),
                 user_lemma_priority=payload.get("user_lemma_priority"),

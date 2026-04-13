@@ -191,6 +191,29 @@ class SATPInferenceEngineTests(unittest.TestCase):
         self.assertIn("theorem", trace)
         self.assertIn("aesop", trace)
 
+    def test_infer_prefers_explicit_formal_statement(self) -> None:
+        def fake_load_policy(_checkpoint: str, _cache: str, device: str | None = None):
+            return (f"{device}-model", device, False)
+
+        seen_statements: list[str] = []
+        formal_statement = "theorem satp_goal\n  (n : Nat)\n  : n = n := by"
+
+        def fake_policy_tactic(_model_and_device, statement: str, **_kwargs):
+            seen_statements.append(statement)
+            return "aesop"
+
+        with (
+            patch.object(service, "preferred_device", return_value="cpu"),
+            patch.object(service, "load_policy", side_effect=fake_load_policy),
+            patch.object(service, "policy_tactic", side_effect=fake_policy_tactic),
+        ):
+            engine = service.SATPInferenceEngine("checkpoint", "cache")
+            result = engine.infer(formal_statement=formal_statement)
+
+        self.assertEqual(result["tactic"], "aesop")
+        self.assertEqual(result["formal_statement"], formal_statement)
+        self.assertEqual(seen_statements, [formal_statement])
+
 
 class SATPHTTPServerSmokeTests(unittest.TestCase):
     def test_http_infer_smoke_uses_cpu_after_cuda_fallback(self) -> None:
@@ -231,6 +254,40 @@ class SATPHTTPServerSmokeTests(unittest.TestCase):
         self.assertEqual(load_calls, ["cuda", "cpu"])
         self.assertIn("INFO     → request POST /infer", stderr.getvalue())
         self.assertIn("INFO     ← response 200 POST /infer", stderr.getvalue())
+
+    def test_http_infer_accepts_formal_statement_without_goal(self) -> None:
+        def fake_load_policy(_checkpoint: str, _cache: str, device: str | None = None):
+            return (f"{device}-model", device, False)
+
+        formal_statement = "theorem satp_goal\n  (n : Nat)\n  : n = n := by"
+        seen_statements: list[str] = []
+
+        def fake_policy_tactic(_model_and_device, statement: str, **_kwargs):
+            seen_statements.append(statement)
+            return "aesop"
+
+        with (
+            patch.object(service, "preferred_device", return_value="cpu"),
+            patch.object(service, "load_policy", side_effect=fake_load_policy),
+            patch.object(service, "policy_tactic", side_effect=fake_policy_tactic),
+        ):
+            engine = service.SATPInferenceEngine("checkpoint", "cache")
+            payload = json.dumps({"formal_statement": formal_statement}).encode("utf-8")
+            raw_request = (
+                b"POST /infer HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(payload)}\r\n\r\n".encode("utf-8")
+                + payload
+            )
+            handler = _TestRequestHandler(raw_request, engine)
+            raw_response = handler.response.getvalue()
+            body = json.loads(raw_response.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["tactic"], "aesop")
+        self.assertEqual(body["formal_statement"], formal_statement)
+        self.assertEqual(seen_statements, [formal_statement])
 
 
 class SATPServerLifecycleTests(unittest.TestCase):
