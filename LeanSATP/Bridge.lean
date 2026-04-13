@@ -77,14 +77,14 @@ private def serviceModuleArgs (cfg : RuntimeConfig) (mode : String) : Array Stri
     "--checkpoint",
     cfg.checkpoint,
     "--cache-dir",
-    cfg.cacheDir,
+    cfg.cacheDir
   ]
   if mode = "--serve" then
     args ++ #[
       "--host",
       defaultServerHost,
       "--port",
-      toString defaultServerPort,
+      toString defaultServerPort
     ]
   else
     args
@@ -106,7 +106,7 @@ private def serviceRunners (cfg : RuntimeConfig) (mode : String) : Array Service
       probe := "python"
       cmd := "env"
       args := #["PYTHONPATH=python/src", "python"] ++ moduleArgs
-    },
+    }
   ]
 
 private def describeRunner (runner : ServiceRunner) : String :=
@@ -199,7 +199,7 @@ private def checkServerHealth : IO Bool := do
       "-sS",
       "--max-time",
       "2",
-      healthUrl,
+      healthUrl
     ]
   }
   if out.exitCode != 0 then
@@ -277,7 +277,7 @@ private def callInferenceService
   let requestBody := Json.compress <| Json.mkObj [
     ("formal_statement", Json.str formalStatement),
     ("user_lemmas", Json.arr <| userLemmas.map Json.str),
-    ("tactic_name", Json.str "aesop"),
+    ("tactic_name", Json.str "aesop")
   ]
   let out ← liftM (m := IO) <| IO.Process.output {
     cmd := "curl"
@@ -291,7 +291,7 @@ private def callInferenceService
       "POST",
       inferUrl,
       "-d",
-      requestBody,
+      requestBody
     ]
   }
   if out.exitCode != 0 then
