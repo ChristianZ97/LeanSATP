@@ -2,7 +2,7 @@ import Lake
 
 open Lake DSL
 
-require mathlib from "../kimina-lean-server/mathlib4"
+require mathlib from "../DSP-Plus/mathlib4"
 
 package LeanSATP where
 
