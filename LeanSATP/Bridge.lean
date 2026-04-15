@@ -133,28 +133,54 @@ private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "
   | .ok stx => .ok ⟨stx⟩
   | .error err => .error err
 
-private def hypothesisJson (decl : LocalDecl) : MetaM Json := do
-  let declType ← instantiateMVars decl.type
-  let renderedType ← ppExpr declType
-  pure <| Json.mkObj [
-    ("name", Json.str decl.userName.toString),
-    ("type", Json.str renderedType.pretty)
-  ]
+private def applyLetSubst (letFVars letValues : Array Expr) (e : Expr) : Expr :=
+  if letFVars.isEmpty then
+    e
+  else
+    e.replaceFVars letFVars letValues
 
-private def collectHypotheses : TacticM (Array Json) := withMainContext do
+/--
+Render the current tactic state as a theorem statement close to SATP's
+training distribution.
+
+Local `let` declarations are substituted away in Lean before pretty-printing,
+which avoids Python-side reconstruction pitfalls such as turning
+`let b := n / 6` into an `optParam` binder.
+-/
+private def collectFormalStatement : TacticM String := withMainContext do
   let lctx ← getLCtx
-  let mut hyps := #[]
+  let mut letFVars : Array Expr := #[]
+  let mut letValues : Array Expr := #[]
+  let mut binderLines : Array String := #[]
+
   for decl in lctx do
-    if decl.isImplementationDetail then
-      continue
     if decl.userName.isAnonymous then
       continue
-    hyps := hyps.push (← hypothesisJson decl)
-  pure hyps
 
-private def collectGoal : TacticM String := withMainContext do
+    let declType ← instantiateMVars decl.type
+    let declType := applyLetSubst letFVars letValues declType
+
+    if let some value := decl.value? then
+      let value ← instantiateMVars value
+      let value := applyLetSubst letFVars letValues value
+      letFVars := letFVars.push decl.toExpr
+      letValues := letValues.push value
+      continue
+
+    if decl.isImplementationDetail || decl.binderInfo.isInstImplicit then
+      continue
+
+    let renderedType ← ppExpr declType
+    binderLines := binderLines.push s!"  ({decl.userName} : {renderedType.pretty})"
+
   let goal ← instantiateMVars (← getMainTarget)
-  return (← ppExpr goal).pretty
+  let goal := applyLetSubst letFVars letValues goal
+  let renderedGoal ← ppExpr goal
+
+  let mut lines : Array String := #[s!"theorem satp_goal"]
+  lines := lines ++ binderLines
+  lines := lines.push s!"  : {renderedGoal.pretty} := by"
+  return String.intercalate "\n" lines.toList
 
 private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array String) := do
   let mut names := #[]
@@ -246,12 +272,10 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
 
 private def callInferenceService
     (_cfg : RuntimeConfig)
-    (goal : String)
-    (hypotheses : Array Json)
+    (formalStatement : String)
     (userLemmas : Array String) : TacticM (Except MessageData String) := do
   let requestBody := Json.compress <| Json.mkObj [
-    ("goal", Json.str goal),
-    ("hypotheses", Json.arr hypotheses),
+    ("formal_statement", Json.str formalStatement),
     ("user_lemmas", Json.arr <| userLemmas.map Json.str),
     ("tactic_name", Json.str "aesop")
   ]
@@ -289,49 +313,89 @@ private def callInferenceService
   | .error err =>
     .error m!"satp response missing ok field: {err}"
 
-private def evalReturnedTactic (tacticString : String) : TacticM (Except MessageData Unit) := do
+private def parseReturnedTactic
+    (tacticString : String) : TacticM (Except MessageData (TSyntax ``tacticSeq)) := do
   match parseAsTacticSeq (← getEnv) tacticString with
   | .error err =>
     return .error m!"satp produced an unparsable tactic:\n{tacticString}\n\n{err}"
   | .ok tacticSeq =>
-    try
-      evalTactic tacticSeq
-      return .ok ()
-    catch err =>
-      return .error err.toMessageData
+    return .ok tacticSeq
 
-private def fallbackToDefaultAesop (reason : MessageData) : TacticM Unit := do
+private def evalReturnedTactic
+    (stxRef : Syntax)
+    (tacticSeq : TSyntax ``tacticSeq)
+    (traceScript : Bool := false) : TacticM (Except MessageData Unit) := do
+  try
+    evalTactic tacticSeq
+    if traceScript then
+      Aesop.addTryThisTacticSeqSuggestion stxRef tacticSeq (← getRef)
+    return .ok ()
+  catch err =>
+    return .error err.toMessageData
+
+private def fallbackToAesop
+    (stxRef : Syntax)
+    (reason : MessageData)
+    (traceScript : Bool := false) : TacticM Unit := do
   logWarning m!"satp fallback to plain aesop: {reason}"
-  evalTactic (← `(tactic| aesop))
+  withRef stxRef do
+    if traceScript then
+      evalTactic (← `(tactic| aesop?))
+    else
+      evalTactic (← `(tactic| aesop))
 
-private def runSatpWithFallback (cfg : RuntimeConfig) (lemmaNames : Array String) : TacticM Unit := do
+private def runSatpWithFallback
+    (stxRef : Syntax)
+    (cfg : RuntimeConfig)
+    (lemmaNames : Array String)
+    (traceScript : Bool := false) : TacticM Unit := do
   match ← ensureServerRunning cfg with
   | .error reason =>
-      fallbackToDefaultAesop reason
+      fallbackToAesop stxRef reason traceScript
       return
   | .ok () =>
       pure ()
-  let goal ← collectGoal
-  let hyps ← collectHypotheses
-  match ← callInferenceService cfg goal hyps lemmaNames with
+  let formalStatement ←
+    try
+      collectFormalStatement
+    catch err =>
+      fallbackToAesop stxRef m!"satp failed to render theorem state: {err.toMessageData}" traceScript
+      return
+  match ← callInferenceService cfg formalStatement lemmaNames with
   | .error reason =>
-      fallbackToDefaultAesop reason
+      fallbackToAesop stxRef reason traceScript
   | .ok tacticString =>
-      match ← evalReturnedTactic tacticString with
-      | .ok () => pure ()
-      | .error reason => fallbackToDefaultAesop reason
+      match ← parseReturnedTactic tacticString with
+      | .error reason =>
+          fallbackToAesop stxRef reason traceScript
+      | .ok tacticSeq =>
+          match ← evalReturnedTactic stxRef tacticSeq traceScript with
+          | .ok () => pure ()
+          | .error reason => fallbackToAesop stxRef reason traceScript
 
 syntax (name := satp) "satp" (ppSpace "[" (term),* "]")? : tactic
+syntax (name := satpTacticQuery) "satp?" (ppSpace "[" (term),* "]")? : tactic
 
 @[tactic satp]
 def evalSatp : Tactic
-  | `(tactic| satp [$terms,*]) => do
+  | `(tactic| satp%$stxRef [$terms,*]) => do
       let cfg ← liftM (m := IO) runtimeConfigFromEnv
       let lemmaNames ← elabUserLemmaNames terms
-      runSatpWithFallback cfg lemmaNames
-  | `(tactic| satp) => do
+      runSatpWithFallback stxRef cfg lemmaNames
+  | `(tactic| satp%$stxRef) => do
       let cfg ← liftM (m := IO) runtimeConfigFromEnv
-      runSatpWithFallback cfg #[]
+      runSatpWithFallback stxRef cfg #[]
+  | _ => throwUnsupportedSyntax
+
+@[tactic satpTacticQuery]
+def evalSatpQuery : Tactic
+  | `(tactic| satp?%$stxRef [$terms,*]) => do
+      let cfg ← liftM (m := IO) runtimeConfigFromEnv
+      let lemmaNames ← elabUserLemmaNames terms
+      runSatpWithFallback stxRef cfg lemmaNames (traceScript := true)
+  | `(tactic| satp?%$stxRef) => do
+      let cfg ← liftM (m := IO) runtimeConfigFromEnv
+      runSatpWithFallback stxRef cfg #[] (traceScript := true)
   | _ => throwUnsupportedSyntax
 
 end LeanSATP
