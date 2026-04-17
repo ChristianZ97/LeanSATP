@@ -8,6 +8,7 @@ import errno
 import io
 import json
 import os
+import re
 import signal
 import shutil
 import sys
@@ -482,6 +483,35 @@ def append_user_lemmas(
     return tactic.rstrip() + "\n" + "\n".join(extra_rules)
 
 
+# Pattern for retrieval-generated lemma rules in an aesop config.  These are
+# emitted by `_to_lean4_string` with the same shape as `append_user_lemmas`
+# (apply / rw / simp only) and always land below 50% priority (lemma tier).
+# Tactic-tier rules (safe 1, unsafe 55-100%, or multi-line wrappers for
+# things like `by field_simp`) never match this pattern.
+_RETRIEVAL_LEMMA_RE = re.compile(
+    r"^\s*\(add\s+unsafe\s+(\d+)%\s+"
+    r"\(by\s+first\s+\|\s+apply\s+\S+\s+\|\s+rw\s+\[\S+\]\s+\|\s+simp\s+only\s+\[\S+\]\)\)\s*$"
+)
+
+
+def strip_retrieval_rules(tactic: str) -> str:
+    """Drop retrieval-sourced lemma rules (<50%) from an aesop config.
+
+    Used by the satp? cascade's Layer 1: when we want the sketch-provided
+    hypotheses to be the sole lemma source, we first remove the
+    policy-attention retrieved premises from the config so they don't
+    compete with or outrank the hints.  Tactic-tier entries
+    (safe / unsafe 55-100%, multi-line wrappers) are preserved.
+    """
+    kept: list[str] = []
+    for line in tactic.split("\n"):
+        match = _RETRIEVAL_LEMMA_RE.match(line)
+        if match and int(match.group(1)) < 50:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def policy_tactic(
     model_and_device,
     formal_statement: str,
@@ -622,18 +652,23 @@ class SATPInferenceEngine:
         user_lemmas: Optional[list[str]] = None,
         tactic_name: str = "aesop",
         user_lemma_priority: Optional[int] = None,
+        strip_retrieval: bool = False,
+        hint_priority: Optional[int] = None,
     ) -> dict[str, Any]:
         formal_statement = (formal_statement or "").strip()
         if not formal_statement:
             raise ValueError("infer requires a non-empty formal_statement")
+
+        # Run the policy WITHOUT appending user lemmas; user_lemma append
+        # and retrieval strip are handled below so the order is explicit:
+        #   policy output  →  (optional) strip retrieval rules  →  append hints
+        policy_kwargs = dict(tactic_name=tactic_name)
         with self._lock:
             try:
                 tactic = policy_tactic(
                     self.model_and_device,
                     formal_statement,
-                    tactic_name=tactic_name,
-                    user_lemmas=user_lemmas,
-                    user_lemma_priority=user_lemma_priority,
+                    **policy_kwargs,
                 )
             except Exception as exc:
                 if self.active_device != "cuda" or not is_cuda_failure(exc):
@@ -642,10 +677,27 @@ class SATPInferenceEngine:
                 tactic = policy_tactic(
                     self.model_and_device,
                     formal_statement,
-                    tactic_name=tactic_name,
-                    user_lemmas=user_lemmas,
-                    user_lemma_priority=user_lemma_priority,
+                    **policy_kwargs,
                 )
+
+        # Layer 1 of the satp? cascade: we want the sketch-provided hint
+        # lemmas to be the only lemma source, so drop the retrieval
+        # suggestions the policy just emitted.  Tactic-tier rules
+        # (safe / unsafe ≥55%) survive.
+        if strip_retrieval:
+            tactic = strip_retrieval_rules(tactic)
+
+        # Append hint lemmas at the caller's requested priority.  If the
+        # caller (old API) passed user_lemma_priority but not hint_priority,
+        # honour the former for backward compatibility.
+        effective_priority = (
+            hint_priority
+            if hint_priority is not None
+            else (user_lemma_priority if user_lemma_priority is not None else 40)
+        )
+        tactic = append_user_lemmas(tactic, user_lemmas, priority_pct=effective_priority)
+
+        with self._lock:
             self._log_inference_trace(formal_statement, tactic)
         return {
             "tactic": tactic,
@@ -728,16 +780,30 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
             user_lemmas = payload.get("user_lemmas") or []
             tactic_name = payload.get("tactic_name", "aesop")
             user_lemma_priority = payload.get("user_lemma_priority")
+            # Two new per-request knobs used by the satp? 3-layer cascade in
+            # Bridge.lean.  strip_retrieval removes the retrieval-sourced
+            # (<50%) lemma rules from the policy's aesop config before
+            # returning; hint_priority controls the priority_pct used when
+            # the hint lemmas are appended on top.  Defaults preserve the
+            # pre-cascade single-call behaviour.
+            strip_retrieval = bool(payload.get("strip_retrieval") or False)
+            hint_priority = payload.get("hint_priority")
+            if hint_priority is None:
+                hint_priority = 40  # match legacy append_user_lemmas default
+            else:
+                hint_priority = int(hint_priority)
 
             # LRU cache lookup before acquiring the semaphore — cache hits
             # dodge GPU work entirely.  Key shape matches engine.infer's
-            # kwargs so different (tactic_name, hints, priority) still
-            # miss cleanly.
+            # kwargs so different (tactic_name, hints, priority, strip,
+            # hint_priority) still miss cleanly.
             cache_key = (
                 formal_statement,
                 tactic_name,
                 tuple(user_lemmas),
                 user_lemma_priority,
+                strip_retrieval,
+                hint_priority,
             )
             cached = None
             if self.server.infer_cache_max > 0:
@@ -784,6 +850,8 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
                     user_lemmas=user_lemmas,
                     tactic_name=tactic_name,
                     user_lemma_priority=user_lemma_priority,
+                    strip_retrieval=strip_retrieval,
+                    hint_priority=hint_priority,
                 )
                 if self.server.infer_cache_max > 0:
                     with self.server.infer_cache_lock:
