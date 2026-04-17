@@ -9,6 +9,7 @@ description = "Standalone LeanSATP runtime for Lean-side SATP inference"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "bm25s>=0.3",
     "huggingface-hub",
     "numpy",
     "rich>=13.0.0",
