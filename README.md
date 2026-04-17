@@ -157,10 +157,22 @@ So the exact behavior is:
 curl --request POST \
   --url http://localhost:5177/infer \
   --header 'Content-Type: application/json' \
-  --data '{"goal":"True"}' | jq
+  --data '{"formal_statement":"theorem t : True := by"}' | jq
 ```
 
 The service logs each request as `→ request ...` and `← response ...`, and on successful inference it prints the full generated Lean proof sketch, including the `theorem ... := by` header and the generated `aesop` configuration.
+
+### Environment variables
+
+The Lean wrapper picks these up at `satp`/`satp?` call time; unset values fall back to the defaults shown.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SATP_CHECKPOINT` | `<pkg>/cache/best_checkpoint.pt` | Override the local checkpoint file path |
+| `SATP_CACHE_DIR` | `<pkg>/cache` | Override the cache directory (checkpoint, retrieval assets) |
+| `SATP_SERVER_HOST` | `127.0.0.1` | SATP inference server host the Lean wrapper dials |
+| `SATP_SERVER_PORT` | `5177` | SATP inference server port |
+| `SATP_REQUEST_TIMEOUT` | `120` | Per-request timeout (seconds) for the curl call to `/infer` |
 
 ## Components
 
@@ -186,11 +198,13 @@ The syntax for invoking the `satp` tactic is `by satp [lemmas]`. The `lemmas` ar
 
 LeanSATP supports an optional runtime retrieval mode.
 
-- **Checkpoint-only mode** (default): LeanSATP runs from the local checkpoint installed by `./setup.sh`, even if no retrieval assets are present.
-- **Runtime retrieval mode**: enabled automatically when the local cache directory contains retrieval assets. LeanSATP does **not** currently auto-download or build retrieval assets. If you want runtime retrieval, put the cache files in the same explicit cache directory as the checkpoint. The runtime looks for:
+- **Checkpoint-only mode** (default): LeanSATP runs from the local checkpoint installed by `./setup.sh`, even if no retrieval assets are absent upstream.
+- **Runtime retrieval mode**: enabled automatically when the local cache directory contains retrieval assets. `./setup.sh` fetches any retrieval assets it finds on the same HF repo as the checkpoint (`ChristianZ97/SATP-aesop-policy`). Missing files are skipped silently. The runtime looks for:
     - `premise_embeddings.npy`
     - `premises_raw.npy`
     - `bm25_index.pkl` (optional; used only for hybrid retrieval)
+
+Pass `--skip-retrieval` to `leansatp_runtime.service --download-only` if you want checkpoint-only setup.
 
 If `premise_embeddings.npy` and `premises_raw.npy` are absent, LeanSATP falls back to no-retrieval mode. If `bm25_index.pkl` is absent, LeanSATP still uses dense retrieval when the dense assets are present.
 

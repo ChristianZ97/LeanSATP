@@ -8,7 +8,6 @@ import errno
 import io
 import json
 import os
-import re
 import signal
 import shutil
 import sys
@@ -23,6 +22,14 @@ DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/SATP-aesop-policy/best_checkpoint
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
 DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
+
+# Retrieval assets live on the same HF repo as the checkpoint. The dense pair
+# (embeddings + raw) is required for retrieval; the BM25 index is optional.
+DEFAULT_RETRIEVAL_FILES = (
+    "premise_embeddings.npy",
+    "premises_raw.npy",
+    "bm25_index.pkl",
+)
 
 _torch = None
 _config = None
@@ -126,6 +133,41 @@ def ensure_checkpoint_download(
         shutil.copy2(downloaded, destination)
 
     return str(destination)
+
+
+def ensure_retrieval_download(
+    cache_dir: str = DEFAULT_CACHE_DIR,
+    checkpoint_source: str = DEFAULT_CHECKPOINT_SOURCE,
+    filenames: tuple[str, ...] = DEFAULT_RETRIEVAL_FILES,
+) -> list[str]:
+    """Best-effort fetch of retrieval assets from the checkpoint's HF repo.
+
+    Files that are not present upstream are skipped silently so retrieval
+    remains optional. Returns the paths of the assets that ended up in
+    `cache_dir`.
+    """
+    if not checkpoint_source.startswith("hf://"):
+        return []
+
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
+
+    repo_id, _ = _parse_hf_checkpoint_source(checkpoint_source)
+    destination_dir = Path(cache_dir).expanduser().resolve(strict=False)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    downloaded: list[str] = []
+    for filename in filenames:
+        target = destination_dir / filename
+        try:
+            with _suppress_startup_noise():
+                source_path = Path(hf_hub_download(repo_id=repo_id, filename=filename))
+        except (EntryNotFoundError, HfHubHTTPError):
+            continue
+        if source_path.resolve() != target.resolve():
+            shutil.copy2(source_path, target)
+        downloaded.append(str(target))
+    return downloaded
 
 
 def preferred_device() -> str:
@@ -317,32 +359,6 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
     return model, device, retrieval_enabled
 
 
-def _sanitize_name(name: str, index: int) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_']", "_", (name or "").strip())
-    cleaned = cleaned or f"h{index}"
-    if cleaned[0].isdigit():
-        cleaned = f"h_{cleaned}"
-    return cleaned
-
-
-def build_formal_statement(
-    goal: str,
-    hypotheses: list[dict[str, str]],
-    *,
-    name: str | None = None,
-) -> str:
-    """Convert the current Lean goal state into a theorem-like prompt."""
-    thm_name = _sanitize_name(name or "", 0) if name else "satp_goal"
-    lines = [f"theorem {thm_name}"]
-    for i, hyp in enumerate(hypotheses):
-        name = _sanitize_name(hyp.get("name", ""), i)
-        hyp_type = (hyp.get("type", "") or "").strip()
-        if hyp_type:
-            lines.append(f"  ({name} : {hyp_type})")
-    lines.append(f"  : {(goal or '').strip()} := by")
-    return "\n".join(lines)
-
-
 def render_full_proof(formal_statement: str, tactic: str) -> str:
     """Combine the theorem prompt and generated tactic into a proof sketch."""
     return formal_statement.rstrip() + "\n" + textwrap.indent(tactic.rstrip(), "  ")
@@ -425,7 +441,7 @@ def render_try_me_message(host: str, port: int) -> str:
         "curl --request POST \\\n"
         f"  --url http://{curl_host}:{port}/infer \\\n"
         "  --header 'Content-Type: application/json' \\\n"
-        '  --data \'{"goal":"True"}\' | jq\n',
+        '  --data \'{"formal_statement":"theorem t : True := by"}\' | jq\n',
         "  ",
     )
 
@@ -598,22 +614,14 @@ class SATPInferenceEngine:
     def infer(
         self,
         *,
-        goal: str = "",
-        hypotheses: Optional[list[dict[str, str]]] = None,
-        formal_statement: str | None = None,
+        formal_statement: str,
         user_lemmas: Optional[list[str]] = None,
         tactic_name: str = "aesop",
         user_lemma_priority: Optional[int] = None,
-        name: str | None = None,
     ) -> dict[str, Any]:
         formal_statement = (formal_statement or "").strip()
         if not formal_statement:
-            hypotheses = hypotheses or []
-            if not goal or not isinstance(goal, str):
-                raise ValueError(
-                    "infer requires non-empty formal_statement or goal"
-                )
-            formal_statement = build_formal_statement(goal, hypotheses, name=name)
+            raise ValueError("infer requires a non-empty formal_statement")
         with self._lock:
             try:
                 tactic = policy_tactic(
@@ -651,20 +659,36 @@ class SATPInferenceEngine:
         )
 
 
+def _optional_str_field(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if value and not isinstance(value, str):
+        raise ValueError(f"request field {key!r} must be a string when provided")
+    return value or ""
+
+
 class _SATPRequestHandler(BaseHTTPRequestHandler):
     server: "_SATPHTTPServer"
 
     def log_message(self, format: str, *args) -> None:
         return
 
-    def _write_json(self, status: int, payload: dict[str, Any]) -> None:
+    def _write_json(self, status: int, payload: dict[str, Any]) -> bool:
+        """Write a JSON response. Returns False if the client already hung up."""
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            log_server(
+                "WARNING",
+                f"client disconnected before response {status} {self.command} {self.path}",
+            )
+            return False
         log_server("INFO", f"← response {status} {self.command} {self.path}")
+        return True
 
     def _log_request_start(self, detail: str = "") -> None:
         suffix = f" [bold magenta]{detail}[/bold magenta]" if detail else ""
@@ -687,35 +711,28 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length)
             payload = json.loads(raw.decode("utf-8"))
-            formal_statement = payload.get("formal_statement") or ""
-            if formal_statement and not isinstance(formal_statement, str):
+            formal_statement = _optional_str_field(payload, "formal_statement")
+            if not formal_statement:
                 raise ValueError(
-                    "request field 'formal_statement' must be a string when provided"
-                )
-
-            goal = payload.get("goal", "")
-            if goal and not isinstance(goal, str):
-                raise ValueError("request field 'goal' must be a string when provided")
-
-            if not formal_statement and not goal:
-                raise ValueError(
-                    "request body must contain string field 'formal_statement' or 'goal'"
+                    "request body must contain string field 'formal_statement'"
                 )
 
             name = payload.get("name") or None
-            detail = name or goal or formal_statement.splitlines()[0]
+            detail = name or formal_statement.split("\n", 1)[0]
             self._log_request_start(detail)
 
             result = self.server.engine.infer(
-                goal=goal,
-                hypotheses=payload.get("hypotheses") or [],
                 formal_statement=formal_statement,
                 user_lemmas=payload.get("user_lemmas") or [],
                 tactic_name=payload.get("tactic_name", "aesop"),
                 user_lemma_priority=payload.get("user_lemma_priority"),
-                name=name,
             )
             self._write_json(200, {"ok": True, **result})
+        except (BrokenPipeError, ConnectionResetError):
+            log_server(
+                "WARNING",
+                f"client disconnected mid-request {self.command} {self.path}",
+            )
         except Exception as exc:
             self._write_json(500, {"ok": False, "error": str(exc)})
 
@@ -846,6 +863,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--download-only", action="store_true")
+    parser.add_argument(
+        "--skip-retrieval",
+        action="store_true",
+        help="Skip downloading retrieval assets (premise embeddings, raw premises, BM25 index) during --download-only",
+    )
     return parser.parse_args()
 
 
@@ -854,7 +876,20 @@ def main() -> int:
 
     if args.download_only:
         resolved = ensure_checkpoint_download(args.checkpoint, args.checkpoint_source)
-        print(json.dumps({"ok": True, "checkpoint_path": resolved}))
+        retrieval_paths: list[str] = []
+        if not args.skip_retrieval:
+            retrieval_paths = ensure_retrieval_download(
+                args.cache_dir, args.checkpoint_source
+            )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "checkpoint_path": resolved,
+                    "retrieval_paths": retrieval_paths,
+                }
+            )
+        )
         return 0
 
     if args.serve:

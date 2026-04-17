@@ -87,7 +87,7 @@ class SATPInferenceEngineTests(unittest.TestCase):
             redirect_stderr(stderr),
         ):
             engine = service.SATPInferenceEngine("checkpoint", "cache")
-            result = engine.infer(goal="True")
+            result = engine.infer(formal_statement="theorem t : True := by")
 
         self.assertEqual(result["tactic"], "aesop")
         self.assertEqual(load_calls, ["cuda", "cpu"])
@@ -121,8 +121,8 @@ class SATPInferenceEngineTests(unittest.TestCase):
             patch.object(service, "policy_tactic", side_effect=fake_policy_tactic),
         ):
             engine = service.SATPInferenceEngine("checkpoint", "cache")
-            first = engine.infer(goal="True")
-            second = engine.infer(goal="True")
+            first = engine.infer(formal_statement="theorem t : True := by")
+            second = engine.infer(formal_statement="theorem t : True := by")
 
         self.assertEqual(first["tactic"], "aesop")
         self.assertEqual(second["tactic"], "aesop")
@@ -148,7 +148,7 @@ class SATPInferenceEngineTests(unittest.TestCase):
         ):
             engine = service.SATPInferenceEngine("checkpoint", "cache")
             with self.assertRaisesRegex(ValueError, "invalid theorem state"):
-                engine.infer(goal="True")
+                engine.infer(formal_statement="theorem t : True := by")
 
         self.assertEqual(load_calls, ["cuda"])
         self.assertEqual(engine.active_device, "cuda")
@@ -166,13 +166,12 @@ class SATPInferenceEngineTests(unittest.TestCase):
             redirect_stderr(stderr),
         ):
             engine = service.SATPInferenceEngine("checkpoint", "cache")
-            result = engine.infer(goal="True")
+            result = engine.infer(formal_statement="theorem t : True := by")
 
         output = stderr.getvalue()
         self.assertEqual(result["tactic"], tactic)
         self.assertIn("INFO     [LeanSATP] Full proof (cpu):", output)
-        self.assertIn("    theorem satp_goal", output)
-        self.assertIn("      : True := by", output)
+        self.assertIn("    theorem t : True := by", output)
         self.assertIn("      aesop (config := { maxRuleApplications := 42 })", output)
 
     def test_full_proof_trace_can_be_colorized(self) -> None:
@@ -236,7 +235,9 @@ class SATPHTTPServerSmokeTests(unittest.TestCase):
             redirect_stderr(stderr),
         ):
             engine = service.SATPInferenceEngine("checkpoint", "cache")
-            payload = json.dumps({"goal": "True"}).encode("utf-8")
+            payload = json.dumps(
+                {"formal_statement": "theorem t : True := by"}
+            ).encode("utf-8")
             raw_request = (
                 b"POST /infer HTTP/1.1\r\n"
                 b"Host: 127.0.0.1\r\n"
@@ -366,7 +367,9 @@ class SATPServerLifecycleTests(unittest.TestCase):
         self.assertIn("INFO     Try me with:", output)
         self.assertIn("curl --request POST \\", output)
         self.assertIn("--url http://localhost:5177/infer \\", output)
-        self.assertIn('--data \'{"goal":"True"}\' | jq', output)
+        self.assertIn(
+            '--data \'{"formal_statement":"theorem t : True := by"}\' | jq', output
+        )
         self.assertNotIn("tactic_name", output)
         self.assertIn("INFO     Shutting down", output)
         self.assertIn("INFO     Waiting for application shutdown.", output)
