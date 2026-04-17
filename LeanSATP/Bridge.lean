@@ -273,14 +273,15 @@ private def callInferenceService
       "-sS",
       "--max-time",
       toString cfg.requestTimeout,
-      -- Retry on transient failures.  curl doubles `--retry-delay` between
-      -- attempts (1s, 2s, 4s) and `--retry-all-errors` covers 5xx + timeout
-      -- + connection resets, which matches the failure modes the SATP
-      -- server can produce under load (503 from the in-flight semaphore,
-      -- curl timeout when the GPU is saturated, dropped TCP connections).
+      -- Retry on transient transport failures (connection reset,
+      -- resolve fail, curl-level timeout).  curl 7.71+ has
+      -- `--retry-all-errors` which extends retry to HTTP 5xx, but this
+      -- host's curl is 7.68 (no such flag) and the whole `curl` call
+      -- fails immediately if we pass it.  Skip that flag: HTTP 503 /
+      -- 500 retry is handled one level up by the wrapper's second
+      -- `((satp?); done)` branch in prove_aesop.py.
       "--retry", "3",
       "--retry-delay", "1",
-      "--retry-all-errors",
       "--retry-max-time", "180",
       "-H",
       "Content-Type: application/json",
