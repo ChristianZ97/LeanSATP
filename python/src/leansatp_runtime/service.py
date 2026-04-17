@@ -18,6 +18,8 @@ from pathlib import Path
 import threading
 from typing import Any, Optional
 
+_DEFAULT_MAX_INFLIGHT = 8
+_SEMAPHORE_ACQUIRE_TIMEOUT = 45.0  # must stay below Bridge.lean's curl timeout
 DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
@@ -721,13 +723,37 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
             detail = name or formal_statement.split("\n", 1)[0]
             self._log_request_start(detail)
 
-            result = self.server.engine.infer(
-                formal_statement=formal_statement,
-                user_lemmas=payload.get("user_lemmas") or [],
-                tactic_name=payload.get("tactic_name", "aesop"),
-                user_lemma_priority=payload.get("user_lemma_priority"),
+            # Gate concurrent inference on a bounded semaphore.  Without
+            # this, ThreadingHTTPServer spins up one thread per request;
+            # the GIL + single-GPU forward pass then turn dozens of
+            # in-flight requests into a stampede that pushes per-call
+            # latency past Bridge.lean's curl timeout.  Acquire with a
+            # bound below the client's timeout so a starving request gets
+            # a clean 503 rather than hanging up the thread.
+            acquired = self.server.inference_sem.acquire(
+                timeout=_SEMAPHORE_ACQUIRE_TIMEOUT
             )
-            self._write_json(200, {"ok": True, **result})
+            if not acquired:
+                log_server(
+                    "WARNING",
+                    f"inference queue full ({self.server.max_inflight} in-flight); "
+                    f"returning 503 for {detail}",
+                )
+                self._write_json(
+                    503,
+                    {"ok": False, "error": "SATP server busy (max in-flight reached)"},
+                )
+                return
+            try:
+                result = self.server.engine.infer(
+                    formal_statement=formal_statement,
+                    user_lemmas=payload.get("user_lemmas") or [],
+                    tactic_name=payload.get("tactic_name", "aesop"),
+                    user_lemma_priority=payload.get("user_lemma_priority"),
+                )
+                self._write_json(200, {"ok": True, **result})
+            finally:
+                self.server.inference_sem.release()
         except (BrokenPipeError, ConnectionResetError):
             log_server(
                 "WARNING",
@@ -751,6 +777,19 @@ class _SATPHTTPServer(ThreadingHTTPServer):
             bind_and_activate=bind_and_activate,
         )
         self.engine = engine
+        # Bounded semaphore caps concurrent inference.  Overridable via
+        # SATP_MAX_INFLIGHT; default 8 keeps GIL + single-GPU forward
+        # within throughput before latency blows past client timeouts.
+        try:
+            max_inflight = int(
+                os.environ.get("SATP_MAX_INFLIGHT", _DEFAULT_MAX_INFLIGHT)
+            )
+        except ValueError:
+            max_inflight = _DEFAULT_MAX_INFLIGHT
+        if max_inflight < 1:
+            max_inflight = _DEFAULT_MAX_INFLIGHT
+        self.max_inflight = max_inflight
+        self.inference_sem = threading.BoundedSemaphore(max_inflight)
 
 
 def _is_address_in_use(exc: BaseException) -> bool:
@@ -823,6 +862,12 @@ def serve(
         signal.signal(signal.SIGINT, _interrupt_server)
         signal.signal(signal.SIGTERM, _interrupt_server)
         log_server("INFO", engine.summary())
+        log_server(
+            "INFO",
+            f"Inference concurrency cap: "
+            f"MAX_INFLIGHT=[bold]{server.max_inflight}[/bold] "
+            f"(override with SATP_MAX_INFLIGHT env var)",
+        )
         log_server("INFO", "Application startup complete.")
         log_server(
             "INFO",
