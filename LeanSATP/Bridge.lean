@@ -8,7 +8,12 @@ namespace LeanSATP
 
 private def defaultServerHost : String := "127.0.0.1"
 private def defaultServerPort : Nat := 5177
-private def defaultRequestTimeout : Nat := 30
+private def defaultRequestTimeout : Nat := 120
+
+private def envNat? (name : String) : IO (Option Nat) := do
+  match ← IO.getEnv name with
+  | some s => pure s.trim.toNat?
+  | none => pure none
 
 private def hasRuntimeFiles (path : FilePath) : IO Bool := do
   let pyproject := path / "pyproject.toml"
@@ -46,6 +51,9 @@ structure RuntimeConfig where
   repoRoot : FilePath
   cacheDir : String
   checkpoint : String
+  host : String
+  port : Nat
+  requestTimeout : Nat
 
 structure ServiceRunner where
   probe : String
@@ -63,10 +71,16 @@ private def runtimeConfigFromEnv : IO RuntimeConfig := do
         let checkpointPath := FilePath.mk checkpoint
         pure ((checkpointPath.parent.getD (FilePath.mk cacheDirDefault)).normalize.toString)
     | none, none => pure cacheDirDefault
+  let host := ((← IO.getEnv "SATP_SERVER_HOST").getD defaultServerHost).trim
+  let port := (← envNat? "SATP_SERVER_PORT").getD defaultServerPort
+  let requestTimeout := (← envNat? "SATP_REQUEST_TIMEOUT").getD defaultRequestTimeout
   return {
     repoRoot := repoRoot
     cacheDir := cacheDir
     checkpoint := checkpointEnv?.getD (defaultCheckpointFromCacheDir cacheDir)
+    host := if host.isEmpty then defaultServerHost else host
+    port := port
+    requestTimeout := requestTimeout
   }
 
 private def serviceModuleArgs (cfg : RuntimeConfig) (mode : String) : Array String :=
@@ -82,9 +96,9 @@ private def serviceModuleArgs (cfg : RuntimeConfig) (mode : String) : Array Stri
   if mode = "--serve" then
     args ++ #[
       "--host",
-      defaultServerHost,
+      cfg.host,
       "--port",
-      toString defaultServerPort
+      toString cfg.port
     ]
   else
     args
@@ -121,11 +135,11 @@ private def pythonEnvironmentMessage (cfg : RuntimeConfig) : MessageData :=
   m!"  • Install uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh\n" ++
   m!"  • Then run: ./setup.sh  (installs Python deps, fetches mathlib, downloads checkpoint)"
 
-private def healthUrl : String :=
-  s!"http://{defaultServerHost}:{defaultServerPort}/health"
+private def healthUrl (cfg : RuntimeConfig) : String :=
+  s!"http://{cfg.host}:{cfg.port}/health"
 
-private def inferUrl : String :=
-  s!"http://{defaultServerHost}:{defaultServerPort}/infer"
+private def inferUrl (cfg : RuntimeConfig) : String :=
+  s!"http://{cfg.host}:{cfg.port}/infer"
 
 private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "<satp>") :
     Except String (TSyntax ``tacticSeq) :=
@@ -133,54 +147,28 @@ private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "
   | .ok stx => .ok ⟨stx⟩
   | .error err => .error err
 
-private def applyLetSubst (letFVars letValues : Array Expr) (e : Expr) : Expr :=
-  if letFVars.isEmpty then
-    e
-  else
-    e.replaceFVars letFVars letValues
-
 /--
 Render the current tactic state as a theorem statement close to SATP's
 training distribution.
 
-Local `let` declarations are substituted away in Lean before pretty-printing,
+Local `let` declarations are zeta-reduced in Lean before pretty-printing,
 which avoids Python-side reconstruction pitfalls such as turning
 `let b := n / 6` into an `optParam` binder.
 -/
 private def collectFormalStatement : TacticM String := withMainContext do
-  let lctx ← getLCtx
-  let mut letFVars : Array Expr := #[]
-  let mut letValues : Array Expr := #[]
   let mut binderLines : Array String := #[]
-
-  for decl in lctx do
-    if decl.userName.isAnonymous then
+  for decl in ← getLCtx do
+    if decl.userName.isAnonymous
+        || decl.isImplementationDetail
+        || decl.binderInfo.isInstImplicit
+        || decl.isLet then
       continue
-
-    let declType ← instantiateMVars decl.type
-    let declType := applyLetSubst letFVars letValues declType
-
-    if let some value := decl.value? then
-      let value ← instantiateMVars value
-      let value := applyLetSubst letFVars letValues value
-      letFVars := letFVars.push decl.toExpr
-      letValues := letValues.push value
-      continue
-
-    if decl.isImplementationDetail || decl.binderInfo.isInstImplicit then
-      continue
-
-    let renderedType ← ppExpr declType
+    let renderedType ← ppExpr (← zetaReduce decl.type)
     binderLines := binderLines.push s!"  ({decl.userName} : {renderedType.pretty})"
 
-  let goal ← instantiateMVars (← getMainTarget)
-  let goal := applyLetSubst letFVars letValues goal
-  let renderedGoal ← ppExpr goal
-
-  let mut lines : Array String := #[s!"theorem satp_goal"]
-  lines := lines ++ binderLines
-  lines := lines.push s!"  : {renderedGoal.pretty} := by"
-  return String.intercalate "\n" lines.toList
+  let renderedGoal ← ppExpr (← zetaReduce (← getMainTarget))
+  let lines := #["theorem _satpGoal"] ++ binderLines ++ #[s!"  : {renderedGoal.pretty} := by"]
+  return "\n".intercalate lines.toList
 
 private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array String) := do
   let mut names := #[]
@@ -192,14 +180,14 @@ private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array 
       throwError "satp only supports identifier lemmas in [ ... ], got: {term}"
   pure names
 
-private def checkServerHealth : IO Bool := do
+private def checkServerHealth (cfg : RuntimeConfig) : IO Bool := do
   let out ← IO.Process.output {
     cmd := "curl"
     args := #[
       "-sS",
       "--max-time",
       "2",
-      healthUrl
+      healthUrl cfg
     ]
   }
   if out.exitCode != 0 then
@@ -236,16 +224,16 @@ private def spawnService (cfg : RuntimeConfig) (runner : ServiceRunner) : IO Uni
   }
   pure ()
 
-private partial def waitForServer (attempts : Nat := 240) : IO Bool := do
+private partial def waitForServer (cfg : RuntimeConfig) (attempts : Nat := 240) : IO Bool := do
   if attempts == 0 then
     return false
-  if ← checkServerHealth then
+  if ← checkServerHealth cfg then
     return true
   IO.sleep 250
-  waitForServer (attempts - 1)
+  waitForServer cfg (attempts - 1)
 
 private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageData Unit) := do
-  let healthy : Bool ← liftM (m := IO) checkServerHealth
+  let healthy : Bool ← liftM (m := IO) <| checkServerHealth cfg
   if healthy then
     return .ok ()
   let runner? ← liftM (m := IO) <| pickServiceRunner cfg "--serve"
@@ -257,21 +245,21 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
     return .error (m!"satp: failed to start inference service\n" ++
       m!"  • Command: {describeRunner runner}\n" ++
       m!"  • Try running `./setup.sh` in {cfg.repoRoot}")
-  let ready : Bool ← liftM (m := IO) waitForServer
+  let ready : Bool ← liftM (m := IO) <| waitForServer cfg
   if ready then
     return .ok ()
   return .error (
-    m!"satp: inference service did not respond (timeout after 20s)\n" ++
+    m!"satp: inference service did not respond (timeout after 60s)\n" ++
     m!"  • Service command: {describeRunner runner}\n" ++
     m!"  • Possible causes:\n" ++
-    m!"    1. Missing checkpoint — run: ./setup.sh\n" ++
+    m!"    1. Missing checkpoint — run: ./setup.sh in {cfg.repoRoot}\n" ++
     m!"    2. Checkpoint path mismatch — expected: {cfg.checkpoint}\n" ++
-    m!"    3. Missing Python deps or mathlib deps — run: ./setup.sh\n" ++
-    m!"    4. Port conflict — check if port 5177 is in use: lsof -i :5177")
+    m!"    3. Missing Python deps or mathlib deps — run: ./setup.sh in {cfg.repoRoot}\n" ++
+    m!"    4. Port conflict — check if port {cfg.port} is in use: lsof -i :{cfg.port}")
 
 
 private def callInferenceService
-    (_cfg : RuntimeConfig)
+    (cfg : RuntimeConfig)
     (formalStatement : String)
     (userLemmas : Array String) : TacticM (Except MessageData String) := do
   let requestBody := Json.compress <| Json.mkObj [
@@ -284,12 +272,12 @@ private def callInferenceService
     args := #[
       "-sS",
       "--max-time",
-      toString defaultRequestTimeout,
+      toString cfg.requestTimeout,
       "-H",
       "Content-Type: application/json",
       "-X",
       "POST",
-      inferUrl,
+      inferUrl cfg,
       "-d",
       requestBody
     ]
@@ -338,11 +326,8 @@ private def fallbackToAesop
     (reason : MessageData)
     (traceScript : Bool := false) : TacticM Unit := do
   logWarning m!"satp fallback to plain aesop: {reason}"
-  withRef stxRef do
-    if traceScript then
-      evalTactic (← `(tactic| aesop?))
-    else
-      evalTactic (← `(tactic| aesop))
+  let tac ← if traceScript then `(tactic| aesop?) else `(tactic| aesop)
+  withRef stxRef (evalTactic tac)
 
 private def runSatpWithFallback
     (stxRef : Syntax)
@@ -373,29 +358,47 @@ private def runSatpWithFallback
           | .ok () => pure ()
           | .error reason => fallbackToAesop stxRef reason traceScript
 
+/--
+`satp` (Steering Aesop for Theorem Proving) queries a local SATP inference
+service for a tailored `aesop` configuration and runs it inside Lean.
+
+Usage:
+- `satp` — run the model-backed pipeline on the current goal.
+- `satp [lem₁, lem₂, …]` — append the listed identifiers as extra `aesop`
+  unsafe rules before invocation.
+
+If the Python service is unavailable or returns a tactic that fails to parse
+or discharge the goal, `satp` logs one warning and falls back to plain `aesop`.
+The server endpoint is `127.0.0.1:5177` by default; override with
+`SATP_SERVER_HOST` / `SATP_SERVER_PORT` / `SATP_REQUEST_TIMEOUT` env vars.
+-/
 syntax (name := satp) "satp" (ppSpace "[" (term),* "]")? : tactic
+
+/--
+`satp?` behaves like `satp` but also prints the exact tactic it ran as a
+"Try this" suggestion so you can replace the call with a concrete proof.
+If `satp?` falls back to `aesop`, the fallback is `aesop?` and the
+suggestion comes from there.
+-/
 syntax (name := satpTacticQuery) "satp?" (ppSpace "[" (term),* "]")? : tactic
+
+private def runSatpFromSyntax
+    (stxRef : Syntax) (terms : Array (TSyntax `term)) (traceScript : Bool) :
+    TacticM Unit := do
+  let cfg ← liftM (m := IO) runtimeConfigFromEnv
+  let lemmaNames ← elabUserLemmaNames terms
+  runSatpWithFallback stxRef cfg lemmaNames traceScript
 
 @[tactic satp]
 def evalSatp : Tactic
-  | `(tactic| satp%$stxRef [$terms,*]) => do
-      let cfg ← liftM (m := IO) runtimeConfigFromEnv
-      let lemmaNames ← elabUserLemmaNames terms
-      runSatpWithFallback stxRef cfg lemmaNames
-  | `(tactic| satp%$stxRef) => do
-      let cfg ← liftM (m := IO) runtimeConfigFromEnv
-      runSatpWithFallback stxRef cfg #[]
+  | `(tactic| satp%$stxRef [$terms,*]) => runSatpFromSyntax stxRef terms false
+  | `(tactic| satp%$stxRef)             => runSatpFromSyntax stxRef #[] false
   | _ => throwUnsupportedSyntax
 
 @[tactic satpTacticQuery]
 def evalSatpQuery : Tactic
-  | `(tactic| satp?%$stxRef [$terms,*]) => do
-      let cfg ← liftM (m := IO) runtimeConfigFromEnv
-      let lemmaNames ← elabUserLemmaNames terms
-      runSatpWithFallback stxRef cfg lemmaNames (traceScript := true)
-  | `(tactic| satp?%$stxRef) => do
-      let cfg ← liftM (m := IO) runtimeConfigFromEnv
-      runSatpWithFallback stxRef cfg #[] (traceScript := true)
+  | `(tactic| satp?%$stxRef [$terms,*]) => runSatpFromSyntax stxRef terms true
+  | `(tactic| satp?%$stxRef)             => runSatpFromSyntax stxRef #[] true
   | _ => throwUnsupportedSyntax
 
 end LeanSATP
