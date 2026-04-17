@@ -13,12 +13,14 @@ import shutil
 import sys
 import textwrap
 import warnings
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
 from typing import Any, Optional
 
 _DEFAULT_MAX_INFLIGHT = 8
+_DEFAULT_INFER_CACHE_SIZE = 10000
 _SEMAPHORE_ACQUIRE_TIMEOUT = 45.0  # must stay below Bridge.lean's curl timeout
 DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
@@ -723,6 +725,38 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
             detail = name or formal_statement.split("\n", 1)[0]
             self._log_request_start(detail)
 
+            user_lemmas = payload.get("user_lemmas") or []
+            tactic_name = payload.get("tactic_name", "aesop")
+            user_lemma_priority = payload.get("user_lemma_priority")
+
+            # LRU cache lookup before acquiring the semaphore — cache hits
+            # dodge GPU work entirely.  Key shape matches engine.infer's
+            # kwargs so different (tactic_name, hints, priority) still
+            # miss cleanly.
+            cache_key = (
+                formal_statement,
+                tactic_name,
+                tuple(user_lemmas),
+                user_lemma_priority,
+            )
+            cached = None
+            if self.server.infer_cache_max > 0:
+                with self.server.infer_cache_lock:
+                    if cache_key in self.server.infer_cache:
+                        cached = self.server.infer_cache[cache_key]
+                        self.server.infer_cache.move_to_end(cache_key)
+                        self.server.infer_cache_hits += 1
+                    else:
+                        self.server.infer_cache_misses += 1
+            if cached is not None:
+                log_server(
+                    "INFO",
+                    f"cache HIT ({self.server.infer_cache_hits} hits / "
+                    f"{self.server.infer_cache_misses} misses)",
+                )
+                self._write_json(200, {"ok": True, **cached})
+                return
+
             # Gate concurrent inference on a bounded semaphore.  Without
             # this, ThreadingHTTPServer spins up one thread per request;
             # the GIL + single-GPU forward pass then turn dozens of
@@ -747,10 +781,19 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
             try:
                 result = self.server.engine.infer(
                     formal_statement=formal_statement,
-                    user_lemmas=payload.get("user_lemmas") or [],
-                    tactic_name=payload.get("tactic_name", "aesop"),
-                    user_lemma_priority=payload.get("user_lemma_priority"),
+                    user_lemmas=user_lemmas,
+                    tactic_name=tactic_name,
+                    user_lemma_priority=user_lemma_priority,
                 )
+                if self.server.infer_cache_max > 0:
+                    with self.server.infer_cache_lock:
+                        self.server.infer_cache[cache_key] = result
+                        self.server.infer_cache.move_to_end(cache_key)
+                        while (
+                            len(self.server.infer_cache)
+                            > self.server.infer_cache_max
+                        ):
+                            self.server.infer_cache.popitem(last=False)
                 self._write_json(200, {"ok": True, **result})
             finally:
                 self.server.inference_sem.release()
@@ -790,6 +833,26 @@ class _SATPHTTPServer(ThreadingHTTPServer):
             max_inflight = _DEFAULT_MAX_INFLIGHT
         self.max_inflight = max_inflight
         self.inference_sem = threading.BoundedSemaphore(max_inflight)
+
+        # LRU cache of /infer results keyed by (formal_statement, tactic_name,
+        # user_lemmas tuple, user_lemma_priority).  A single DSP eval typically
+        # re-requests the same formal statement many times (different sketch
+        # attempts rewrite the same theorem header, retries re-send the same
+        # goal).  Policy forward is deterministic given inputs, so a cache hit
+        # short-circuits both the semaphore and the GPU work.
+        try:
+            infer_cache_size = int(
+                os.environ.get("SATP_INFER_CACHE_SIZE", _DEFAULT_INFER_CACHE_SIZE)
+            )
+        except ValueError:
+            infer_cache_size = _DEFAULT_INFER_CACHE_SIZE
+        if infer_cache_size < 0:
+            infer_cache_size = 0
+        self.infer_cache_max = infer_cache_size
+        self.infer_cache: "OrderedDict[tuple, dict]" = OrderedDict()
+        self.infer_cache_lock = threading.Lock()
+        self.infer_cache_hits = 0
+        self.infer_cache_misses = 0
 
 
 def _is_address_in_use(exc: BaseException) -> bool:
@@ -867,6 +930,12 @@ def serve(
             f"Inference concurrency cap: "
             f"MAX_INFLIGHT=[bold]{server.max_inflight}[/bold] "
             f"(override with SATP_MAX_INFLIGHT env var)",
+        )
+        log_server(
+            "INFO",
+            f"Inference LRU cache: "
+            f"SIZE=[bold]{server.infer_cache_max}[/bold] entries "
+            f"(override with SATP_INFER_CACHE_SIZE env var; 0 disables)",
         )
         log_server("INFO", "Application startup complete.")
         log_server(

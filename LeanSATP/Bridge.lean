@@ -273,6 +273,15 @@ private def callInferenceService
       "-sS",
       "--max-time",
       toString cfg.requestTimeout,
+      -- Retry on transient failures.  curl doubles `--retry-delay` between
+      -- attempts (1s, 2s, 4s) and `--retry-all-errors` covers 5xx + timeout
+      -- + connection resets, which matches the failure modes the SATP
+      -- server can produce under load (503 from the in-flight semaphore,
+      -- curl timeout when the GPU is saturated, dropped TCP connections).
+      "--retry", "3",
+      "--retry-delay", "1",
+      "--retry-all-errors",
+      "--retry-max-time", "180",
       "-H",
       "Content-Type: application/json",
       "-X",
