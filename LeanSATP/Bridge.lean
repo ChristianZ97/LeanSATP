@@ -332,24 +332,50 @@ private def parseReturnedTactic
     return .ok tacticSeq
 
 private def evalReturnedTactic
-    (stxRef : Syntax)
-    (tacticSeq : TSyntax ``tacticSeq)
-    (traceScript : Bool := false) : TacticM (Except MessageData Unit) := do
+    (tacticSeq : TSyntax ``tacticSeq) : TacticM (Except MessageData Unit) := do
   try
     evalTactic tacticSeq
-    if traceScript then
-      Aesop.addTryThisTacticSeqSuggestion stxRef tacticSeq (← getRef)
     return .ok ()
   catch err =>
     return .error err.toMessageData
+
+-- Emit a single, positionally-anchored Try-this suggestion for a cascade
+-- layer that just closed the goal. The message is a `logInfoAt stxRef`
+-- diagnostic so the lake log carries a `file:line:col: info:` prefix
+-- uniquely identifying the satp? call site — callers pair bodies to
+-- source gaps by line rather than by emission order (which breaks when
+-- a layer eval-ok but done-fails, or a later layer succeeds).
+--
+-- `layerLabel` is one of "bare" / "L1" / "L2" / "L3" / "fallback" so
+-- downstream analysis can distinguish which cascade branch fired.
+-- `emitClear = true` prepends the corresponding `clear * -` (possibly
+-- with keep-list) to the aesop body — reflecting what the layer
+-- actually ran inside tryCascadeLayer before calling the policy.
+private def emitLayerSuggestion
+    (stxRef : Syntax)
+    (layerLabel : String)
+    (clearKeep : Array String)
+    (emitClear : Bool)
+    (tacticText : String) : TacticM Unit := do
+  let keepStr : String := String.intercalate " " clearKeep.toList
+  let clearPrefix : String :=
+    if !emitClear then ""
+    else if clearKeep.isEmpty then "clear * -\n  "
+    else s!"clear * - {keepStr}\n  "
+  logInfoAt stxRef m!"satp\nlayer={layerLabel}\nTry this:\n  {clearPrefix}{tacticText}"
 
 private def fallbackToAesop
     (stxRef : Syntax)
     (reason : MessageData)
     (traceScript : Bool := false) : TacticM Unit := do
   logWarning m!"satp fallback to plain aesop: {reason}"
-  let tac ← if traceScript then `(tactic| aesop?) else `(tactic| aesop)
-  withRef stxRef (evalTactic tac)
+  withRef stxRef (evalTactic (← `(tactic| aesop)))
+  if traceScript then
+    -- Fallback closed the goal live via plain `aesop`, but reproducing
+    -- that outcome standalone (no retrieval state) is unreliable.
+    -- Emit `sorry` as the honest suggestion so downstream Form B/C
+    -- under-claims rather than pretending bare `aesop` will pass.
+    emitLayerSuggestion stxRef "fallback" #[] false "sorry"
 
 -- Clear all local hypotheses except the listed identifier names (Mathlib
 -- `clear * -` syntax).  When `keep` is empty this clears everything that
@@ -371,7 +397,10 @@ private def tryInferLayer
     (userLemmas : Array String)
     (stripRetrieval : Bool)
     (hintPriority : Nat)
-    (traceScript : Bool) : TacticM Bool := do
+    (traceScript : Bool)
+    (layerLabel : String)
+    (clearKeep : Array String)
+    (emitClear : Bool) : TacticM Bool := do
   let formalStatement ←
     try collectFormalStatement
     catch _ => return false
@@ -381,14 +410,19 @@ private def tryInferLayer
       match ← parseReturnedTactic tacticString with
       | .error _ => return false
       | .ok tacticSeq =>
-          match ← evalReturnedTactic stxRef tacticSeq traceScript with
+          match ← evalReturnedTactic tacticSeq with
           | .error _ => return false
           | .ok () =>
               -- Require all goals closed; this is what distinguishes a
               -- cascade "this layer worked" from "aesop returned without
-              -- fully discharging".
+              -- fully discharging". Only after `done` succeeds do we
+              -- emit the Try-this suggestion — this avoids the
+              -- eval-ok/done-fail case polluting the log with bodies
+              -- that don't actually close the gap.
               try
                 evalTactic (← `(tactic| done))
+                if traceScript then
+                  emitLayerSuggestion stxRef layerLabel clearKeep emitClear tacticString
                 return true
               catch _ => return false
 
@@ -402,11 +436,13 @@ private def tryCascadeLayer
     (userLemmas : Array String)
     (stripRetrieval : Bool)
     (hintPriority : Nat)
-    (traceScript : Bool) : TacticM Bool := do
+    (traceScript : Bool)
+    (layerLabel : String) : TacticM Bool := do
   let snapshot ← saveState
   try
     clearExceptHints clearKeep
-    if ← tryInferLayer stxRef cfg userLemmas stripRetrieval hintPriority traceScript then
+    if ← tryInferLayer stxRef cfg userLemmas stripRetrieval hintPriority
+        traceScript layerLabel clearKeep true then
       return true
     else
       snapshot.restore
@@ -444,7 +480,7 @@ private def runSatpCascade
     -- the goal itself doesn't reference them (e.g. `h_pos : 0 < n` in a
     -- goal `1 ≤ n`), which would make otherwise-provable top-level
     -- callers fail for a reason unrelated to the policy.
-    match ← tryInferLayer stxRef cfg #[] false 40 traceScript with
+    match ← tryInferLayer stxRef cfg #[] false 40 traceScript "bare" #[] false with
     | true => return
     | false =>
         fallbackToAesop stxRef m!"satp?: retrieval-only attempt failed" traceScript
@@ -455,13 +491,13 @@ private def runSatpCascade
   -- or, for L2, strips intermediate haves.
   --
   -- L1: narrow scope + strip retrieval + hint@50%  (strongly trust sketch)
-  if ← tryCascadeLayer stxRef cfg lemmaNames lemmaNames true 50 traceScript then
+  if ← tryCascadeLayer stxRef cfg lemmaNames lemmaNames true 50 traceScript "L1" then
     return
   -- L2: clear intermediates + keep retrieval + no hints  (distrust sketch)
-  if ← tryCascadeLayer stxRef cfg #[] #[] false 40 traceScript then
+  if ← tryCascadeLayer stxRef cfg #[] #[] false 40 traceScript "L2" then
     return
   -- L3: narrow scope + keep retrieval + hint@50%  (combined)
-  if ← tryCascadeLayer stxRef cfg lemmaNames lemmaNames false 50 traceScript then
+  if ← tryCascadeLayer stxRef cfg lemmaNames lemmaNames false 50 traceScript "L3" then
     return
 
   -- All cascade paths failed — fall back to a single plain `aesop` so the
