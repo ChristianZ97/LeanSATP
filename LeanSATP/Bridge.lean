@@ -149,27 +149,62 @@ private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "
   | .error err => .error err
 
 /--
-Render the current tactic state as a theorem statement close to SATP's
-training distribution.
+Iterate the filtered local context used by both input renderers. Keeps
+non-anonymous, non-implementation, non-inst-implicit, non-`let` hypotheses
+and zeta-reduces their types so Python reconstruction doesn't trip on
+let-bindings (e.g. `let b := n / 6` turning into an `optParam` binder).
+-/
+private def collectFilteredHyps : TacticM (Array (Lean.Name × Lean.Format)) :=
+  withMainContext do
+    let mut acc : Array (Lean.Name × Lean.Format) := #[]
+    for decl in ← getLCtx do
+      if decl.userName.isAnonymous
+          || decl.isImplementationDetail
+          || decl.binderInfo.isInstImplicit
+          || decl.isLet then
+        continue
+      let renderedType ← ppExpr (← zetaReduce decl.type)
+      acc := acc.push (decl.userName, renderedType)
+    return acc
 
-Local `let` declarations are zeta-reduced in Lean before pretty-printing,
-which avoids Python-side reconstruction pitfalls such as turning
-`let b := n / 6` into an `optParam` binder.
+/--
+Render the current tactic state as a theorem statement close to SATP's
+original (2025) training distribution.
 -/
 private def collectFormalStatement : TacticM String := withMainContext do
-  let mut binderLines : Array String := #[]
-  for decl in ← getLCtx do
-    if decl.userName.isAnonymous
-        || decl.isImplementationDetail
-        || decl.binderInfo.isInstImplicit
-        || decl.isLet then
-      continue
-    let renderedType ← ppExpr (← zetaReduce decl.type)
-    binderLines := binderLines.push s!"  ({decl.userName} : {renderedType.pretty})"
-
+  let hyps ← collectFilteredHyps
+  let binderLines := hyps.map fun (n, t) => s!"  ({n} : {t.pretty})"
   let renderedGoal ← ppExpr (← zetaReduce (← getMainTarget))
   let lines := #["theorem _satpGoal"] ++ binderLines ++ #[s!"  : {renderedGoal.pretty} := by"]
   return "\n".intercalate lines.toList
+
+/--
+Render the current tactic state as a raw goal state (Lean's `⊢` format),
+matching the pretrain distribution and the input modality used by
+BFS-Prover / ReProver / LeanCopilot. One hypothesis per line, goal
+prefixed with `⊢`.
+-/
+private def collectGoalState : TacticM String := withMainContext do
+  let hyps ← collectFilteredHyps
+  let hypLines := hyps.map fun (n, t) => s!"{n} : {t.pretty}"
+  let renderedGoal ← ppExpr (← zetaReduce (← getMainTarget))
+  let lines := hypLines ++ #[s!"⊢ {renderedGoal.pretty}"]
+  return "\n".intercalate lines.toList
+
+/--
+Pick the input renderer based on `SATP_INPUT_MODE` env var (read once per
+call; cost is negligible vs the HTTP round-trip).
+  • `goal` (default) → `collectGoalState` — aligns with pretrain + peer
+    tacGens (BFS-Prover/ReProver/LeanCopilot).
+  • `theorem` → `collectFormalStatement` — original 2025 SATP finetune
+    format. Keep for A/B revert without rebuild.
+-/
+private def collectSatpInput : TacticM String := do
+  let mode := (← IO.getEnv "SATP_INPUT_MODE").getD "goal"
+  if mode == "theorem" then
+    collectFormalStatement
+  else
+    collectGoalState
 
 private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array String) := do
   let mut names := #[]
@@ -402,7 +437,7 @@ private def tryInferLayer
     (clearKeep : Array String)
     (emitClear : Bool) : TacticM Bool := do
   let formalStatement ←
-    try collectFormalStatement
+    try collectSatpInput
     catch _ => return false
   match ← callInferenceService cfg formalStatement userLemmas stripRetrieval hintPriority with
   | .error _ => return false
