@@ -203,13 +203,13 @@ call; cost is negligible vs the HTTP round-trip).
     gap-level finetune experiments where the model is retrained on
     bare goal-state inputs.
 
-Codex pt.8 Finding 2 (retry alternate mode before fallback) intentionally
+Codex pt.8 Finding 2 (retry alternate mode before fail) intentionally
 NOT implemented: the retry would double HTTP latency for every failed
 policy call, and per-call `satp_input_mode=...` telemetry already gives
 downstream analysis the signal to compute per-mode pass rate post-hoc.
 If a future ablation needs it, wire a second `tryInferLayer` call with
-the alternate mode between `snap.restore` and `fallbackToAesop` in
-`runSatpCascade`.
+the alternate mode between `snap.restore` and the trailing `throwError`
+in `runSatpCascade`.
 -/
 private def collectSatpInput : TacticM String := do
   let mode := (← IO.getEnv "SATP_INPUT_MODE").getD "theorem"
@@ -420,26 +420,51 @@ private def emitLayerSuggestion
     else s!"clear * - {keepStr}\n  "
   logInfoAt stxRef m!"satp\nlayer={layerLabel}\nTry this:\n  {clearPrefix}{tacticText}"
 
+-- User-facing fallback for bare `satp`: on server / policy failure, run
+-- plain `aesop` and log a warning. NOT used by `satp?` — the ?-variant
+-- is the eval-side tactic and must throw on policy-fail so paper's
+-- `satp` mode closure counts reflect the 0.2B policy alone, not aesop
+-- bleed through. See `runSatpCascade`'s traceScript branching.
 private def fallbackToAesop
     (stxRef : Syntax)
-    (reason : MessageData)
-    (traceScript : Bool := false) : TacticM Unit := do
+    (reason : MessageData) : TacticM Unit := do
   logWarning m!"satp fallback to plain aesop: {reason}"
   withRef stxRef (evalTactic (← `(tactic| aesop)))
-  if traceScript then
-    -- Emit a Bridge-owned `satp\nlayer=fallback\nTry this:\n  aesop`
-    -- block so build_stages._parse_satp_layer_suggestions picks up
-    -- the closure. Body is literal `aesop` — replay-safe for any gap
-    -- plain aesop could close live (same Mathlib hash in final verify).
-    -- Do NOT rely on `aesop?`'s own Try-this: it's misplaced for inline
-    -- `have x := by aesop?` forms, and lacks the `satp\n` header the
-    -- downstream parser keys on.
-    emitLayerSuggestion stxRef "fallback" #[] false "aesop"
+
+-- Structured failure kinds for policy attempts. Splits "SATP miss" from
+-- infrastructure/protocol faults so post-hoc analysis can filter cleanly:
+-- `miss` is a genuine policy output that didn't close the goal (counts
+-- as a true SATP negative for the paper matrix); the others indicate
+-- server / network / server-side / parse / tactic-exec problems that
+-- should be retried or investigated rather than silently counted as
+-- SATP misses.
+inductive SatpFailKind where
+  | input    (msg : MessageData)   -- could not collect goal/theorem input
+  | request  (msg : MessageData)   -- /infer HTTP call itself failed
+  | parse    (msg : MessageData)   -- returned text couldn't be parsed
+  | exec     (msg : MessageData)   -- tactic parsed but elaboration threw
+  | miss                           -- tactic ran cleanly but did not close
+
+private def SatpFailKind.label : SatpFailKind → String
+  | .input _   => "input"
+  | .request _ => "request"
+  | .parse _   => "parse"
+  | .exec _    => "exec"
+  | .miss      => "miss"
+
+private def SatpFailKind.reason : SatpFailKind → MessageData
+  | .input msg   => msg
+  | .request msg => msg
+  | .parse msg   => msg
+  | .exec msg    => msg
+  | .miss        => m!"policy tactic did not close the goal"
 
 -- Run one HTTP /infer request with the given flags, then parse & eval the
--- returned tactic and check that no goals remain.  Returns `true` on total
--- success; `false` if any step fails (caller is expected to have wrapped
--- this in `saveState` + `restoreState` so tactic state is reset).
+-- returned tactic and check that no goals remain. Returns `.ok ()` on
+-- total success; `.error <kind>` otherwise, where the kind distinguishes
+-- a real SATP miss from server / transport / parse / exec faults.
+-- Caller is expected to have wrapped this in `saveState` + `restoreState`
+-- so tactic state is reset on any non-success outcome.
 private def tryInferLayer
     (stxRef : Syntax)
     (cfg : RuntimeConfig)
@@ -449,43 +474,53 @@ private def tryInferLayer
     (traceScript : Bool)
     (layerLabel : String)
     (clearKeep : Array String)
-    (emitClear : Bool) : TacticM Bool := do
+    (emitClear : Bool) : TacticM (Except SatpFailKind Unit) := do
   let formalStatement ←
     try collectSatpInput
-    catch _ => return false
+    catch e => return .error (.input e.toMessageData)
   match ← callInferenceService cfg formalStatement userLemmas stripRetrieval hintPriority with
-  | .error _ => return false
+  | .error reason => return .error (.request reason)
   | .ok tacticString =>
       match ← parseReturnedTactic tacticString with
-      | .error _ => return false
+      | .error reason => return .error (.parse reason)
       | .ok tacticSeq =>
           match ← evalReturnedTactic tacticSeq with
-          | .error _ => return false
+          | .error reason => return .error (.exec reason)
           | .ok () =>
               -- Require all goals closed; this is what distinguishes a
-              -- cascade "this layer worked" from "aesop returned without
-              -- fully discharging". Only after `done` succeeds do we
-              -- emit the Try-this suggestion — this avoids the
-              -- eval-ok/done-fail case polluting the log with bodies
-              -- that don't actually close the gap.
+              -- "tactic ran successfully" from "policy genuinely missed".
+              -- Only after `done` succeeds do we emit the Try-this
+              -- suggestion — avoids polluting the log with non-closing
+              -- bodies.
               try
                 evalTactic (← `(tactic| done))
                 if traceScript then
                   emitLayerSuggestion stxRef layerLabel clearKeep emitClear tacticString
-                return true
-              catch _ => return false
+                return .ok ()
+              catch _ => return .error .miss
 
 -- Single-shot policy call. Model sees only the goal; `lemmaNames` is
--- discarded here (see note below). On any failure, restore the tactic
--- state and fall back to plain `aesop` + a Bridge-owned
--- `satp\nlayer=fallback\nTry this:\n  aesop` marker so downstream
--- build_stages.py picks up the fallback closure.
+-- discarded here (see note below).
+--
+-- Failure handling is gated by `traceScript`, which also distinguishes
+-- the two public tactics:
+--   * `satp?` (traceScript=true, eval-side)  — throw on any failure so
+--     the outer `first | ((...; satp?); done) | ...` wrapper takes the
+--     next alternative. No aesop fallback: that would pull Mathlib's
+--     `@[aesop]` attrs from `default`, inflating `satp` mode's closure
+--     count past `aesop_plain`'s and muddying the paper's 0.2B policy
+--     claim.
+--   * `satp`  (traceScript=false, user-facing) — fall back to plain
+--     `aesop` and keep elaborating. README documents this as the
+--     ergonomic entry point; LeanSATPTest uses bare `satp` without
+--     any outer combinator. A hard throw here would break README
+--     examples on cold server start / transient service hiccups.
 --
 -- The saveState/restoreState wrapper matters because `tryInferLayer`
 -- may eval a multi-step aesop config that applies partial mutations
 -- (e.g. `intro x; cases h; ...`) before its trailing `done` fails.
--- Without the restore, the fallback `aesop` would run on that
--- half-mutated state rather than the original goal.
+-- Without the restore, outer alternatives (or the fallback `aesop`)
+-- would see a half-mutated state rather than the original goal.
 --
 -- Timing emit (`satp_layer=policy,ms=T,status=ok|fail`) lives OUTSIDE
 -- the restored region so the fail record survives `snap.restore`
@@ -523,24 +558,36 @@ private def runSatpCascade
   let tEnsure1 ← IO.monoMsNow
   match ensureResult with
   | .error reason =>
-      logInfoAt stxRef s!"satp_layer=ensure_server,ms={tEnsure1 - tEnsure0},status=fail"
-      fallbackToAesop stxRef reason traceScript
-      return
+      logInfoAt stxRef s!"satp_layer=ensure_server,ms={tEnsure1 - tEnsure0},status=fail,fail_kind=server"
+      if traceScript then
+        throwError "satp?: SATP server unavailable: {reason}"
+      else
+        fallbackToAesop stxRef reason
+        return
   | .ok () =>
       logInfoAt stxRef s!"satp_layer=ensure_server,ms={tEnsure1 - tEnsure0},status=ok"
   let snap ← saveState
   let t0 ← IO.monoMsNow
-  let ok ← try
+  -- Outer try/catch is defensive: tryInferLayer already classifies all
+  -- paths it owns. An exception escaping here would be a Lean-level
+  -- tactic crash outside evalReturnedTactic — extremely rare, but we
+  -- still tag it as `exec` rather than silently swallowing.
+  let result : Except SatpFailKind Unit ← try
     tryInferLayer stxRef cfg #[] false 40 traceScript "policy" #[] false
-  catch _ => pure false
+  catch e => pure (.error (.exec e.toMessageData))
   let t1 ← IO.monoMsNow
   let elapsed := t1 - t0
-  if ok then
-    logInfoAt stxRef s!"satp_layer=policy,ms={elapsed},status=ok"
-    return
-  snap.restore
-  logInfoAt stxRef s!"satp_layer=policy,ms={elapsed},status=fail"
-  fallbackToAesop stxRef m!"satp? policy failed" traceScript
+  match result with
+  | .ok () =>
+      logInfoAt stxRef s!"satp_layer=policy,ms={elapsed},status=ok"
+      return
+  | .error kind =>
+      snap.restore
+      logInfoAt stxRef s!"satp_layer=policy,ms={elapsed},status=fail,fail_kind={kind.label}"
+      if traceScript then
+        throwError "satp?: policy failed ({kind.label}): {kind.reason}"
+      else
+        fallbackToAesop stxRef m!"satp policy failed ({kind.label}): {kind.reason}"
 
 /--
 `satp` (Steering Aesop for Theorem Proving) queries a local SATP inference
@@ -555,19 +602,23 @@ Usage:
   rules).  To re-enable hint injection, reconnect `lemmaNames` inside
   `runSatpCascade`.
 
-If the Python service is unavailable or the policy call fails, `satp` logs
-one warning and falls back to plain `aesop`.  The server endpoint is
-`127.0.0.1:5177` by default; override with `SATP_SERVER_HOST` /
-`SATP_SERVER_PORT` / `SATP_REQUEST_TIMEOUT` env vars.
+If the Python service is unavailable or the policy call fails, `satp`
+logs one warning and falls back to plain `aesop` so usage in the
+elaboration of ordinary proofs is robust to transient server issues.
+The server endpoint is `127.0.0.1:5177` by default; override with
+`SATP_SERVER_HOST` / `SATP_SERVER_PORT` / `SATP_REQUEST_TIMEOUT` env vars.
 -/
 syntax (name := satp) "satp" (ppSpace "[" (term),* "]")? : tactic
 
 /--
-`satp?` behaves like `satp` but also prints the exact tactic it ran as a
-"Try this" suggestion so you can replace the call with a concrete proof.
-If `satp?` falls back to plain `aesop`, the emitted suggestion is the
-literal string `aesop` (replay-safe against the same Mathlib hash), not
-the policy's resolved body.
+`satp?` is the evaluation-oriented variant: it prints the exact tactic
+the policy ran as a "Try this" suggestion (for distill-back into a
+concrete proof) AND throws on any failure (server unavailable or
+policy miss) instead of falling back to `aesop`. The no-fallback
+semantics keep `satp` mode's closure count attributable to the 0.2B
+policy alone, so `satp - aesop_plain` cleanly measures the learned
+policy's marginal value. Use bare `satp` (no `?`) for ordinary proof
+scripts that want robust behavior on transient failures.
 -/
 syntax (name := satpTacticQuery) "satp?" (ppSpace "[" (term),* "]")? : tactic
 

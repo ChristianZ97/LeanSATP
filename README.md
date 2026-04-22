@@ -4,6 +4,11 @@
 
 The `satp` tactic queries a local SATP inference service for an `aesop` configuration tailored to the current proof goal, then runs the resulting tactic inside Lean. The Python service itself does not perform formal verification: it only generates the tactic. Lean then executes that tactic and checks the proof as usual. If the Python side is unavailable, `satp` logs one warning and falls back to plain `aesop`.
 
+Two tactic variants are exposed:
+
+- `satp` — user-facing. Falls back to plain `aesop` on transient failures (cold server start, policy miss).
+- `satp?` — evaluation variant. Prints the exact tactic the policy ran as a "Try this" suggestion, and throws on any failure instead of falling back. Useful when measuring SATP's isolated contribution (`first | ((satp?); done) | sorry` leaves unclosed gaps as `sorry` rather than mixing in `aesop`'s coverage).
+
 ## Highlights
 
 - 📄 Paper: *SATP: Steering Aesop for Theorem Proving* (under review)
@@ -182,6 +187,27 @@ LeanSATP consists of the following components:
 - **PyTorch inference service** — a bundled runtime in `python/src/leansatp_runtime`
 - **Model checkpoint** — [`ChristianZ97/SATP-aesop-policy`](https://huggingface.co/ChristianZ97/SATP-aesop-policy) on Hugging Face
 - **Lean proof search** — [Aesop](https://github.com/leanprover-community/aesop)
+
+
+## Optional: `bfsaesop` (BFS tree search, opt-in)
+
+`LeanSATP.BFS` exports a `bfsaesop` macro that drives `aesop`'s BFS search with LeanCopilot's `tacGen` as the only rule. This is kept off the top-level `import LeanSATP` so callers who only need `satp`/`satp?` do NOT transitively require LeanCopilot.
+
+To use it:
+
+1. Add LeanCopilot to your project's lakefile (LeanSATP does not declare it as a dependency).
+2. Start a BFS-Prover aggregator on `localhost:23338` (or point `LeanCopilot.suggest_tactics.model` at your own generator).
+3. Import the module and call the macro:
+
+```lean
+import Mathlib
+import LeanSATP.BFS
+
+example (a b : Nat) : a + b = b + a := by
+  bfsaesop
+```
+
+The macro internally binds `LeanCopilot.suggest_tactics.model := "BFS-Prover"` via `set_option ... in`, so the generator is pinned at the tactic's use site regardless of the caller's current option state. `bfsaesop` uses `rule_sets := [bfs, -builtin, -default]` to exclude Aesop's built-ins and Mathlib's `@[aesop]` attributes, leaving only the LeanCopilot tacGen path — every closure is attributable to the external model.
 
 
 ## Usage
