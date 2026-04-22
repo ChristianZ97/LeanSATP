@@ -16,17 +16,25 @@ set_option maxHeartbeats 0
 
 open Lean Meta LeanCopilot
 
+-- Default model identity = Hugging Face path of the BFS-Prover model
+-- we evaluated against. Swap this string and re-register below to point
+-- `bfsaesop` at a different vLLM-backed generator; the macro expansion
+-- re-sets `LeanCopilot.suggest_tactics.model` to the same literal, so
+-- both sides must stay in sync. `host` / `port` target whatever HTTP
+-- server you expose (our eval uses a BFS-Prover aggregator on
+-- `localhost:23338`).
 def BFS : ExternalGenerator := {
-  name := "BFS-Prover-API"
+  name := "ByteDance-Seed/BFS-Prover-V2-7B"
   host := "localhost"
   port := 23338
 }
 
 -- `initialize` runs on module load, so every `lake env lean` that
 -- imports LeanSATP.BFS registers the generator before any tactic
--- fires. Required for `bfsaesop`'s tacGen path to reach the BFS
--- aggregator on port 23338.
-initialize registerGenerator "BFS-Prover" (.external BFS)
+-- fires. The registered name MUST match `BFS.name` above (and the
+-- literal in the `bfsaesop` macro below) — LeanCopilot looks up
+-- generators by this string at tactic execution time.
+initialize registerGenerator "ByteDance-Seed/BFS-Prover-V2-7B" (.external BFS)
 
 -- Paper-citable `bfsaesop` macro.
 --   maxGoals := 64     — cite aesop docs (search budget cap)
@@ -36,17 +44,22 @@ initialize registerGenerator "BFS-Prover" (.external BFS)
 --     cite LeanCopilot: only tacGen rule in scope. No aesop built-ins,
 --     no Mathlib @[aesop] attrs.
 --
--- The `set_option LeanCopilot.suggest_tactics.model "BFS-Prover" in`
--- prefix binds the generator model at tactic expansion time, so
--- `bfsaesop` in any calling context resolves tacGen to BFS-Prover even
--- if the caller's file never set the option. LeanCopilot reads the
--- option via `getOptions` at runtime (see LeanCopilot/Options.lean);
--- a top-level `set_option` in THIS file would not propagate through
--- import. LeanCopilot's own examples use the same `set_option ... in`
--- scoping pattern.
+-- The `set_option LeanCopilot.suggest_tactics.model "..." in` prefix
+-- pins the generator at tactic expansion time, so `bfsaesop` always
+-- resolves tacGen to the same model regardless of the caller's current
+-- options. LeanCopilot reads the option via `getOptions` at runtime
+-- (see LeanCopilot/Options.lean); a top-level `set_option` in this
+-- file would not propagate through `import`. LeanCopilot's own
+-- examples use the same `set_option ... in` scoping pattern.
+--
+-- To swap generators, edit the three occurrences of
+-- `"ByteDance-Seed/BFS-Prover-V2-7B"` (this macro + `BFS.name` above +
+-- `registerGenerator` above) to your model identifier, and point
+-- `BFS.host` / `BFS.port` at your server. The rest of the pipeline is
+-- model-agnostic.
 macro "bfsaesop" : tactic =>
   `(tactic|
-      set_option LeanCopilot.suggest_tactics.model "BFS-Prover" in
+      set_option LeanCopilot.suggest_tactics.model "ByteDance-Seed/BFS-Prover-V2-7B" in
       aesop?
         (config := { maxGoals := 64, bfsScore := true, terminal := true })
         (rule_sets := [bfs, -builtin, -default]))
