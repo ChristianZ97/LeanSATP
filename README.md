@@ -186,12 +186,12 @@ LeanSATP consists of the following components:
 
 ## Usage
 
-The syntax for invoking the `satp` tactic is `by satp [lemmas]`. The `lemmas` argument is optional and can be used to pass an explicit list of lemmas whose names are appended to the generated `aesop` script as extra unsafe rules.
+The syntax for invoking the `satp` tactic is `by satp [lemmas]`. The bracketed `lemmas` list is accepted for API back-compatibility but is currently **ignored** — the policy model does not ingest user hints and no post-inference Aesop rule injection is performed. `satp` and `satp [h1, h2]` produce the same behavior. To re-enable hint injection, reconnect `lemmaNames` inside `runSatpCascade` in `LeanSATP/Bridge.lean` (and expect a corresponding server-side change if hints are meant to reach the model).
 
 ### Examples
 
 - `satp` — run the model-backed SATP pipeline
-- `satp [Nat.add_comm, Nat.add_assoc]` — run SATP and append explicit lemmas
+- `satp [Nat.add_comm, Nat.add_assoc]` — same as above; the bracket list is parsed then discarded
 
 
 ### Retrieval
