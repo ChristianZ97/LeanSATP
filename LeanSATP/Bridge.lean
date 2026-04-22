@@ -194,13 +194,25 @@ private def collectGoalState : TacticM String := withMainContext do
 /--
 Pick the input renderer based on `SATP_INPUT_MODE` env var (read once per
 call; cost is negligible vs the HTTP round-trip).
-  • `goal` (default) → `collectGoalState` — aligns with pretrain + peer
-    tacGens (BFS-Prover/ReProver/LeanCopilot).
-  • `theorem` → `collectFormalStatement` — original 2025 SATP finetune
-    format. Keep for A/B revert without rebuild.
+  • `theorem` (default, 2026-04-21) → `collectFormalStatement` — original
+    2025 SATP finetune format. A/B on minif2f-test showed
+    theorem-level 103/244 vs goal-state 97/244 (overlap 95,
+    goal-only 2, theorem-only 8), so theorem stays the default.
+  • `goal` → `collectGoalState` — aligns with pretrain + peer tacGens
+    (BFS-Prover/ReProver/LeanCopilot).  Kept as opt-in for future
+    gap-level finetune experiments where the model is retrained on
+    bare goal-state inputs.
+
+Codex pt.8 Finding 2 (retry alternate mode before fallback) intentionally
+NOT implemented: the retry would double HTTP latency for every failed
+policy call, and per-call `satp_input_mode=...` telemetry already gives
+downstream analysis the signal to compute per-mode pass rate post-hoc.
+If a future ablation needs it, wire a second `tryInferLayer` call with
+the alternate mode between `snap.restore` and `fallbackToAesop` in
+`runSatpCascade`.
 -/
 private def collectSatpInput : TacticM String := do
-  let mode := (← IO.getEnv "SATP_INPUT_MODE").getD "goal"
+  let mode := (← IO.getEnv "SATP_INPUT_MODE").getD "theorem"
   if mode == "theorem" then
     collectFormalStatement
   else
@@ -214,6 +226,14 @@ private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array 
       names := names.push id.getId.toString
     | _ =>
       throwError "satp only supports identifier lemmas in [ ... ], got: {term}"
+  -- Codex pt.8 Finding 1 remediation: surface the discard so callers
+  -- don't silently rely on hint threading that no longer reaches the
+  -- model or aesop rules. Compile-time warning is visible in IDE/CI
+  -- without hard-erroring on existing call sites (pipeline wrappers
+  -- were already switched to bare `satp?` in build_stages.py +
+  -- tactic_providers.py, so this only fires on hand-written callers).
+  if !names.isEmpty then
+    Lean.logWarning m!"satp: bracketed hint list {names} is accepted for API back-compat but currently discarded (policy model does not ingest hints, and no aesop-rule injection is performed). See LeanSATP/README.md for migration guidance."
   pure names
 
 private def checkServerHealth (cfg : RuntimeConfig) : IO Bool := do
@@ -381,11 +401,12 @@ private def evalReturnedTactic
 -- source gaps by line rather than by emission order (which breaks when
 -- a layer eval-ok but done-fails, or a later layer succeeds).
 --
--- `layerLabel` is one of "bare" / "L1" / "L2" / "L3" / "fallback" so
--- downstream analysis can distinguish which cascade branch fired.
+-- `layerLabel` is "policy" for the single-shot policy call; retained as
+-- a param for forward compatibility with any re-introduced cascading.
 -- `emitClear = true` prepends the corresponding `clear * -` (possibly
 -- with keep-list) to the aesop body — reflecting what the layer
--- actually ran inside tryCascadeLayer before calling the policy.
+-- actually ran before calling the policy (retained for API symmetry;
+-- the single-shot cascade always passes `emitClear=false`).
 private def emitLayerSuggestion
     (stxRef : Syntax)
     (layerLabel : String)
@@ -406,21 +427,14 @@ private def fallbackToAesop
   logWarning m!"satp fallback to plain aesop: {reason}"
   withRef stxRef (evalTactic (← `(tactic| aesop)))
   if traceScript then
-    -- Fallback closed the goal live via plain `aesop`, but reproducing
-    -- that outcome standalone (no retrieval state) is unreliable.
-    -- Emit `sorry` as the honest suggestion so downstream Form B/C
-    -- under-claims rather than pretending bare `aesop` will pass.
-    emitLayerSuggestion stxRef "fallback" #[] false "sorry"
-
--- Clear all local hypotheses except the listed identifier names (Mathlib
--- `clear * -` syntax).  When `keep` is empty this clears everything that
--- can be safely cleared (signature variables referenced by the goal stay).
-private def clearExceptHints (keep : Array String) : TacticM Unit := do
-  let idents := keep.map (fun name => mkIdent (Name.mkSimple name))
-  if idents.isEmpty then
-    evalTactic (← `(tactic| clear * -))
-  else
-    evalTactic (← `(tactic| clear * - $idents*))
+    -- Emit a Bridge-owned `satp\nlayer=fallback\nTry this:\n  aesop`
+    -- block so build_stages._parse_satp_layer_suggestions picks up
+    -- the closure. Body is literal `aesop` — replay-safe for any gap
+    -- plain aesop could close live (same Mathlib hash in final verify).
+    -- Do NOT rely on `aesop?`'s own Try-this: it's misplaced for inline
+    -- `have x := by aesop?` forms, and lacks the `satp\n` header the
+    -- downstream parser keys on.
+    emitLayerSuggestion stxRef "fallback" #[] false "aesop"
 
 -- Run one HTTP /infer request with the given flags, then parse & eval the
 -- returned tactic and check that no goals remain.  Returns `true` on total
@@ -461,104 +475,87 @@ private def tryInferLayer
                 return true
               catch _ => return false
 
--- Try a single cascade layer with a specific clear + HTTP configuration.
--- Wraps the attempt in saveState / restoreState so failure rolls the
--- tactic state back (otherwise a half-applied `clear` would leak).
-private def tryCascadeLayer
-    (stxRef : Syntax)
-    (cfg : RuntimeConfig)
-    (clearKeep : Array String)
-    (userLemmas : Array String)
-    (stripRetrieval : Bool)
-    (hintPriority : Nat)
-    (traceScript : Bool)
-    (layerLabel : String) : TacticM Bool := do
-  let snapshot ← saveState
-  try
-    clearExceptHints clearKeep
-    if ← tryInferLayer stxRef cfg userLemmas stripRetrieval hintPriority
-        traceScript layerLabel clearKeep true then
-      return true
-    else
-      snapshot.restore
-      return false
-  catch _ =>
-    snapshot.restore
-    return false
-
--- 3-layer cascade (when hints are provided) that mirrors DSP+'s
--- bfsaesopLoop escalation pattern but with SATP-specific signals:
---   L1: narrow scope to hints + strip retrieval + hint priority 50%
---       ("strongly trust the sketch; drop our own retrieval suggestions")
---   L2: clear all local context + keep retrieval + no hints passed
---       ("distrust the sketch; let the policy's retrieval decide")
---   L3: narrow scope to hints + keep retrieval + hint priority 50%
---       ("kitchen-sink: combine sketch hints with retrieval")
--- Without hints only L2 runs.  All layers fall back to `aesop`/`aesop?`
--- if none closes the goal.
+-- Single-shot policy call. Model sees only the goal; `lemmaNames` is
+-- discarded here (see note below). On any failure, restore the tactic
+-- state and fall back to plain `aesop` + a Bridge-owned
+-- `satp\nlayer=fallback\nTry this:\n  aesop` marker so downstream
+-- build_stages.py picks up the fallback closure.
+--
+-- The saveState/restoreState wrapper matters because `tryInferLayer`
+-- may eval a multi-step aesop config that applies partial mutations
+-- (e.g. `intro x; cases h; ...`) before its trailing `done` fails.
+-- Without the restore, the fallback `aesop` would run on that
+-- half-mutated state rather than the original goal.
+--
+-- Timing emit (`satp_layer=policy,ms=T,status=ok|fail`) lives OUTSIDE
+-- the restored region so the fail record survives `snap.restore`
+-- (Tactic.SavedState.restore also restores the message log).
+-- `logInfoAt stxRef` anchors the record to the source call site so
+-- downstream build_stages.py can tie timings to a specific `satp?` gap.
+--
+-- `lemmaNames` arrives from `satp? [h1, h2]` syntax but is intentionally
+-- discarded before reaching the server: the policy model never ingests
+-- user_lemmas (they were only ever appended post-inference as aesop
+-- rules), and we no longer inject aesop rules manually — we want the
+-- model's original behavior. Syntax is preserved for API back-compat;
+-- any ident list is parsed then dropped here. If a hint-injection
+-- pathway is reintroduced (e.g. feeding names to model input via a
+-- separate server field), switch the `#[]` below to `lemmaNames`.
 private def runSatpCascade
     (stxRef : Syntax)
     (cfg : RuntimeConfig)
     (lemmaNames : Array String)
     (traceScript : Bool := false) : TacticM Unit := do
-  match ← ensureServerRunning cfg with
+  let _ := lemmaNames
+  -- Emit the resolved input-rendering mode once per call so downstream
+  -- tooling / ablation analysis can tell `theorem` and `goal` runs apart
+  -- without re-reading the env. Done here, before any saveState region,
+  -- so the record survives `snap.restore` on policy failure.
+  let inputMode := (← IO.getEnv "SATP_INPUT_MODE").getD "theorem"
+  logInfoAt stxRef s!"satp_input_mode={inputMode}"
+  -- Separate event from the policy call so budget-sweep replay can
+  -- account for cold-spawn overhead (health check + waitForServer can
+  -- cost tens of seconds on the first call after boot; warm hits are
+  -- <10ms). `ensureServerRunning` is pure IO, no tactic-state mutation,
+  -- so no snapshot needed around it.
+  let tEnsure0 ← IO.monoMsNow
+  let ensureResult ← ensureServerRunning cfg
+  let tEnsure1 ← IO.monoMsNow
+  match ensureResult with
   | .error reason =>
+      logInfoAt stxRef s!"satp_layer=ensure_server,ms={tEnsure1 - tEnsure0},status=fail"
       fallbackToAesop stxRef reason traceScript
       return
   | .ok () =>
-      pure ()
-
-  if lemmaNames.isEmpty then
-    -- Bare `satp?` (no hints): single legacy-style call on the current
-    -- goal state.  We deliberately do NOT clear here because `clear * -`
-    -- with no keep list will drop signature-level hypotheses whenever
-    -- the goal itself doesn't reference them (e.g. `h_pos : 0 < n` in a
-    -- goal `1 ≤ n`), which would make otherwise-provable top-level
-    -- callers fail for a reason unrelated to the policy.
-    match ← tryInferLayer stxRef cfg #[] false 40 traceScript "bare" #[] false with
-    | true => return
-    | false =>
-        fallbackToAesop stxRef m!"satp?: retrieval-only attempt failed" traceScript
-        return
-
-  -- With hints: full 3-layer cascade.  Each layer narrows scope to the
-  -- named hints (keeping signature vars referenced by the goal anyway)
-  -- or, for L2, strips intermediate haves.
-  --
-  -- L1: narrow scope + strip retrieval + hint@50%  (strongly trust sketch)
-  if ← tryCascadeLayer stxRef cfg lemmaNames lemmaNames true 50 traceScript "L1" then
+      logInfoAt stxRef s!"satp_layer=ensure_server,ms={tEnsure1 - tEnsure0},status=ok"
+  let snap ← saveState
+  let t0 ← IO.monoMsNow
+  let ok ← try
+    tryInferLayer stxRef cfg #[] false 40 traceScript "policy" #[] false
+  catch _ => pure false
+  let t1 ← IO.monoMsNow
+  let elapsed := t1 - t0
+  if ok then
+    logInfoAt stxRef s!"satp_layer=policy,ms={elapsed},status=ok"
     return
-  -- L2: clear intermediates + keep retrieval + no hints  (distrust sketch)
-  if ← tryCascadeLayer stxRef cfg #[] #[] false 40 traceScript "L2" then
-    return
-  -- L3: narrow scope + keep retrieval + hint@50%  (combined)
-  if ← tryCascadeLayer stxRef cfg lemmaNames lemmaNames false 50 traceScript "L3" then
-    return
-
-  -- All cascade paths failed — fall back to a single plain `aesop` so the
-  -- caller gets a last-ditch attempt rather than `satp?` itself throwing.
-  fallbackToAesop stxRef m!"satp? cascade: all layers failed" traceScript
+  snap.restore
+  logInfoAt stxRef s!"satp_layer=policy,ms={elapsed},status=fail"
+  fallbackToAesop stxRef m!"satp? policy failed" traceScript
 
 /--
 `satp` (Steering Aesop for Theorem Proving) queries a local SATP inference
 service for a tailored `aesop` configuration and runs it inside Lean.
 
 Usage:
-- `satp` — retrieval-only run on the current goal (Layer 2 only).  Clears
-  intermediate local hypotheses so the policy sees a theorem-level goal
-  matching its training distribution.
-- `satp [h₁, h₂, …]` — 3-layer cascade that respects sketch-provided
-  hint hypotheses:
-    L1  narrow scope to `{h₁, h₂}`, strip retrieval rules, hint at 50%
-        ("strongly trust sketch; drop retrieval suggestions")
-    L2  clear intermediates, keep retrieval, discard hints
-        ("distrust sketch; rely on retrieval")
-    L3  narrow scope to `{h₁, h₂}`, keep retrieval, hint at 50%
-        ("combined; both signals on the table")
-  Each layer saves/restores tactic state, so a failed layer does not leak
-  `clear` effects into the next.
+- `satp` — single-shot policy call on the current goal state.  The model
+  only sees the goal; its built-in retrieval picks the rules.
+- `satp [h₁, h₂, …]` — same call; the bracket list is accepted for
+  API back-compat but **ignored** (the policy model does not ingest
+  user hints and we no longer inject them post-inference as aesop
+  rules).  To re-enable hint injection, reconnect `lemmaNames` inside
+  `runSatpCascade`.
 
-If the Python service is unavailable or every layer fails, `satp` logs
+If the Python service is unavailable or the policy call fails, `satp` logs
 one warning and falls back to plain `aesop`.  The server endpoint is
 `127.0.0.1:5177` by default; override with `SATP_SERVER_HOST` /
 `SATP_SERVER_PORT` / `SATP_REQUEST_TIMEOUT` env vars.
@@ -568,8 +565,9 @@ syntax (name := satp) "satp" (ppSpace "[" (term),* "]")? : tactic
 /--
 `satp?` behaves like `satp` but also prints the exact tactic it ran as a
 "Try this" suggestion so you can replace the call with a concrete proof.
-If `satp?` falls back to `aesop`, the fallback is `aesop?` and the
-suggestion comes from there.
+If `satp?` falls back to plain `aesop`, the emitted suggestion is the
+literal string `aesop` (replay-safe against the same Mathlib hash), not
+the policy's resolved body.
 -/
 syntax (name := satpTacticQuery) "satp?" (ppSpace "[" (term),* "]")? : tactic
 
