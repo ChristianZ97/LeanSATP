@@ -28,12 +28,15 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
 DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 
-# Retrieval assets live on the same HF repo as the checkpoint. The dense pair
-# (embeddings + raw) is required for retrieval; the BM25 index is optional.
+# Retrieval assets live on the same HF repo as the checkpoint, under a
+# ``premises/`` subfolder. The dense pair (embeddings + raw) is required
+# for retrieval; the BM25 index is optional. On disk we flatten to
+# ``cache_dir/<basename>`` so ``policy.py``'s ``load_premise_embeddings``
+# (which reads ``cache_dir/premise_embeddings.npy`` etc.) finds them.
 DEFAULT_RETRIEVAL_FILES = (
-    "premise_embeddings.npy",
-    "premises_raw.npy",
-    "bm25_index.pkl",
+    "premises/premise_embeddings.npy",
+    "premises/premises_raw.npy",
+    "premises/bm25_index.pkl",
 )
 
 _torch = None
@@ -163,7 +166,10 @@ def ensure_retrieval_download(
 
     downloaded: list[str] = []
     for filename in filenames:
-        target = destination_dir / filename
+        # Flatten any HF subdirectory so policy.py's
+        # ``cache_dir/<basename>`` convention keeps working no matter
+        # how the HF repo is organised.
+        target = destination_dir / Path(filename).name
         try:
             with _suppress_startup_noise():
                 source_path = Path(hf_hub_download(repo_id=repo_id, filename=filename))
@@ -695,7 +701,9 @@ class SATPInferenceEngine:
             if hint_priority is not None
             else (user_lemma_priority if user_lemma_priority is not None else 40)
         )
-        tactic = append_user_lemmas(tactic, user_lemmas, priority_pct=effective_priority)
+        tactic = append_user_lemmas(
+            tactic, user_lemmas, priority_pct=effective_priority
+        )
 
         with self._lock:
             self._log_inference_trace(formal_statement, tactic)
@@ -858,8 +866,7 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
                         self.server.infer_cache[cache_key] = result
                         self.server.infer_cache.move_to_end(cache_key)
                         while (
-                            len(self.server.infer_cache)
-                            > self.server.infer_cache_max
+                            len(self.server.infer_cache) > self.server.infer_cache_max
                         ):
                             self.server.infer_cache.popitem(last=False)
                 self._write_json(200, {"ok": True, **result})
