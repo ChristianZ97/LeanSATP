@@ -257,9 +257,8 @@ class HybridRetriever:
         bm25_ranks = np.argsort(np.argsort(-bm25_scores))
 
         # RRF score: sum of 1/(rank + k) for each retriever
-        rrf_scores = (
-            1.0 / (dense_ranks + self.rrf_k + 1)
-            + 1.0 / (bm25_ranks + self.rrf_k + 1)
+        rrf_scores = 1.0 / (dense_ranks + self.rrf_k + 1) + 1.0 / (
+            bm25_ranks + self.rrf_k + 1
         )
 
         actual_k = min(k, len(rrf_scores))
@@ -272,6 +271,7 @@ class HybridRetriever:
         self, dense_scores: np.ndarray, bm25_scores: np.ndarray, k: int
     ) -> Tuple[List[int], np.ndarray]:
         """Linear combination of normalized scores."""
+
         # Min-max normalize both score arrays
         def normalize(scores):
             min_s, max_s = scores.min(), scores.max()

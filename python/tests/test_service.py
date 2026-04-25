@@ -235,9 +235,9 @@ class SATPHTTPServerSmokeTests(unittest.TestCase):
             redirect_stderr(stderr),
         ):
             engine = service.SATPInferenceEngine("checkpoint", "cache")
-            payload = json.dumps(
-                {"formal_statement": "theorem t : True := by"}
-            ).encode("utf-8")
+            payload = json.dumps({"formal_statement": "theorem t : True := by"}).encode(
+                "utf-8"
+            )
             raw_request = (
                 b"POST /infer HTTP/1.1\r\n"
                 b"Host: 127.0.0.1\r\n"
