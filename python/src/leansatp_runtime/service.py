@@ -42,10 +42,9 @@ DEFAULT_RETRIEVAL_FILES = (
 )
 
 _torch = None
-_config = None
 _AesopPolicy = None
 _to_lean4_string = None
-_LoRAConfig = None
+_MAX_SEQUENCE_LENGTH = None
 _RichConsole = None
 _RichSyntax = None
 _LOG_LEVEL_COLORS = {
@@ -69,7 +68,7 @@ _CUDA_ERROR_MARKERS = (
 
 def _ensure_imports() -> None:
     """Import heavyweight LeanSATP runtime modules lazily."""
-    global _torch, _config, _AesopPolicy, _to_lean4_string, _LoRAConfig
+    global _torch, _AesopPolicy, _to_lean4_string, _MAX_SEQUENCE_LENGTH
     if _torch is not None:
         return
 
@@ -77,14 +76,14 @@ def _ensure_imports() -> None:
 
     _torch = _t
 
-    from leansatp_runtime.config import config as _c
-    from leansatp_runtime.models.components import LoRAConfig as _LC
-    from leansatp_runtime.models.policy import (
-        AesopPolicy as _AP,
-        to_lean4_string as _tl,
-    )
+    from leansatp_runtime.models import AesopPolicy as _AP, to_lean4_string as _tl
+    from leansatp_runtime.models.components.premise_encoder import MAX_SEQUENCE_LENGTH
 
-    _config, _AesopPolicy, _to_lean4_string, _LoRAConfig = _c, _AP, _tl, _LC
+    _AesopPolicy, _to_lean4_string, _MAX_SEQUENCE_LENGTH = (
+        _AP,
+        _tl,
+        MAX_SEQUENCE_LENGTH,
+    )
 
 
 def _parse_hf_checkpoint_source(checkpoint_source: str) -> tuple[str, str]:
@@ -318,6 +317,44 @@ def log_server(
     print(f"{prefix} {message}", file=stream)
 
 
+_TRAINED_CHECKPOINT_REPO = "ChristianZ97/SATP-aesop-policy-xatten"
+
+
+def _expected_lemma_k() -> int:
+    from leansatp_runtime.models.components.heads import DEFAULT_LEMMA_K
+
+    return DEFAULT_LEMMA_K
+
+
+def _validate_checkpoint_shape(state_dict) -> None:
+    """Fail fast when the checkpoint's hardcoded architecture parameters disagree."""
+    calib_key = "lemma_heads.calibration.0.weight"
+    expected_k = _expected_lemma_k()
+    if calib_key not in state_dict:
+        raise RuntimeError(
+            f"checkpoint is missing {calib_key!r}; runtime targets {_TRAINED_CHECKPOINT_REPO}"
+        )
+    ckpt_lemma_k = state_dict[calib_key].shape[0]
+    if ckpt_lemma_k != expected_k:
+        raise RuntimeError(
+            f"checkpoint LEMMA_K={ckpt_lemma_k} disagrees with runtime LEMMA_K={expected_k}; "
+            f"runtime targets {_TRAINED_CHECKPOINT_REPO}"
+        )
+
+
+def _validate_state_dict_load(incompatible_keys) -> None:
+    """Reject a state_dict load that is not a perfect parameter-name match."""
+    missing = list(incompatible_keys.missing_keys)
+    unexpected = list(incompatible_keys.unexpected_keys)
+    if missing or unexpected:
+        raise RuntimeError(
+            "checkpoint architecture mismatch: "
+            f"missing_keys={missing[:3]!r} ({len(missing)} total), "
+            f"unexpected_keys={unexpected[:3]!r} ({len(unexpected)} total); "
+            f"runtime targets {_TRAINED_CHECKPOINT_REPO}"
+        )
+
+
 def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None):
     """Load the LeanSATP policy model once and keep it resident."""
     _ensure_imports()
@@ -327,37 +364,16 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
 
     ckpt = _torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
-    calib_key = "lemma_heads.calibration.0.weight"
-    if calib_key in state_dict:
-        ckpt_lemma_k = state_dict[calib_key].shape[0]
-        if ckpt_lemma_k != _config.LEMMA_K:
-            log_server(
-                "INFO",
-                f"[LeanSATP] Overriding LEMMA_K: {_config.LEMMA_K} -> {ckpt_lemma_k}",
-            )
-            _config.LEMMA_K = ckpt_lemma_k
-
-    use_lora = getattr(_config, "USE_LORA", False)
-    lora_cfg = None
-    if use_lora:
-        lora_cfg = _LoRAConfig(
-            r=getattr(_config, "LORA_R", 16),
-            lora_alpha=getattr(_config, "LORA_ALPHA", 32),
-            lora_dropout=getattr(_config, "LORA_DROPOUT", 0.1),
-            target_modules=getattr(
-                _config, "LORA_TARGET_MODULES", ("q", "k", "v", "o")
-            ),
-        )
+    _validate_checkpoint_shape(state_dict)
 
     with _suppress_startup_noise():
         model = _AesopPolicy(
-            freeze_base=True,
-            use_lora=use_lora,
-            lora_config=lora_cfg,
+            use_lora=True,
             device=device,
             cache_dir=cache_dir,
         )
-    model.load_state_dict(state_dict, strict=False)
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    _validate_state_dict_load(incompatible)
     try:
         model.load_premise_embeddings()
         retrieval_enabled = True
@@ -536,16 +552,14 @@ def policy_tactic(
     lemma_scores = None
     lemma_embs = None
     if retrieval_enabled and model.has_premise_cache():
-        top_k_premises, lemma_scores, lemma_embs = model.retrieve(
-            formal_statement, k=_config.LEMMA_K
-        )
+        top_k_premises, lemma_scores, lemma_embs = model.retrieve(formal_statement)
 
     inputs = model.tokenizer(
         [formal_statement],
         return_tensors="pt",
         padding=True,
         truncation=True,
-        max_length=_config.MAX_SEQUENCE_LENGTH,
+        max_length=_MAX_SEQUENCE_LENGTH,
     )
     input_ids = inputs["input_ids"].to(device)
     attention_mask = inputs["attention_mask"].to(device)
