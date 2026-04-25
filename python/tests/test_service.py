@@ -5,8 +5,10 @@ from __future__ import annotations
 import errno
 import json
 import sys
+import threading
 import warnings
 import unittest
+from collections import OrderedDict
 from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 from unittest.mock import patch
@@ -17,6 +19,13 @@ from leansatp_runtime import service
 class _DummyServer:
     def __init__(self, engine: service.SATPInferenceEngine):
         self.engine = engine
+        self.max_inflight = 1
+        self.inference_sem = threading.BoundedSemaphore(1)
+        self.infer_cache_max = 0
+        self.infer_cache: "OrderedDict[tuple, dict]" = OrderedDict()
+        self.infer_cache_lock = threading.Lock()
+        self.infer_cache_hits = 0
+        self.infer_cache_misses = 0
 
 
 class _TestRequestHandler(service._SATPRequestHandler):
@@ -324,6 +333,8 @@ class SATPServerLifecycleTests(unittest.TestCase):
 
         class FakeServer:
             engine = None
+            max_inflight = 1
+            infer_cache_max = 0
 
             def server_bind(self) -> None:
                 server_events.append("bound")
