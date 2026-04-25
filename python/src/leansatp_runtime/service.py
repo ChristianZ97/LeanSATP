@@ -23,7 +23,9 @@ from typing import Any, Optional
 _DEFAULT_MAX_INFLIGHT = 8
 _DEFAULT_INFER_CACHE_SIZE = 10000
 _SEMAPHORE_ACQUIRE_TIMEOUT = 45.0  # must stay below Bridge.lean's curl timeout
-DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/SATP-aesop-policy/best_checkpoint.pt"
+DEFAULT_CHECKPOINT_SOURCE = (
+    "hf://ChristianZ97/SATP-aesop-policy-xatten/best_checkpoint.pt"
+)
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
 DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")

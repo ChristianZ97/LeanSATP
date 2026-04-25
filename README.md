@@ -185,7 +185,7 @@ LeanSATP consists of the following components:
 
 - **Lean wrapper** — a standalone Lean 4 package exposing the `satp` tactic
 - **PyTorch inference service** — a bundled runtime in `python/src/leansatp_runtime`
-- **Model checkpoint** — [`ChristianZ97/SATP-aesop-policy`](https://huggingface.co/ChristianZ97/SATP-aesop-policy) on Hugging Face
+- **Model checkpoint** — [`ChristianZ97/SATP-aesop-policy-xatten`](https://huggingface.co/ChristianZ97/SATP-aesop-policy-xatten) on Hugging Face
 - **Lean proof search** — [Aesop](https://github.com/leanprover-community/aesop)
 
 
@@ -225,7 +225,7 @@ The syntax for invoking the `satp` tactic is `by satp [lemmas]`. The bracketed `
 LeanSATP supports an optional runtime retrieval mode.
 
 - **Checkpoint-only mode** (default): LeanSATP runs from the local checkpoint installed by `./setup.sh`, even if no retrieval assets are absent upstream.
-- **Runtime retrieval mode**: enabled automatically when the local cache directory contains retrieval assets. `./setup.sh` fetches any retrieval assets it finds on the same HF repo as the checkpoint (`ChristianZ97/SATP-aesop-policy`). Missing files are skipped silently. The runtime looks for:
+- **Runtime retrieval mode**: enabled automatically when the local cache directory contains retrieval assets. `./setup.sh` fetches any retrieval assets it finds on the same HF repo as the checkpoint (`ChristianZ97/SATP-aesop-policy-xatten`). Missing files are skipped silently. The runtime looks for:
     - `premise_embeddings.npy`
     - `premises_raw.npy`
     - `bm25_index.pkl` (optional; used only for hybrid retrieval)
