@@ -2,6 +2,7 @@
 lake-manifest.json
 .venv/
 cache/
+SATP-Training/
 python/.ruff_cache/
 python/.mypy_cache/
 python/.pytest_cache/

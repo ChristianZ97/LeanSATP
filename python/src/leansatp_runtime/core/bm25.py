@@ -1,23 +1,17 @@
-# src/aesop/core/bm25.py
-"""
-BM25 Retrieval Module for Hybrid Search
+"""BM25 sparse retrieval (via `bm25s`) + hybrid dense/sparse fusion.
 
-Provides BM25 sparse retrieval to complement dense embedding retrieval.
-Uses rank-biased centroid (RBC) fusion or simple score fusion.
-
-Implementation is backed by the `bm25s` library (vectorised numpy
-scoring) for two to three orders of magnitude lower per-query latency
-than the previous pure-Python loop — this matters because the DSP eval
-fires N /infer calls per sketch and BM25 scoring was the biggest CPU
-hotspot inside /infer on a 180k-premise corpus.  The external API
-(BM25Index.build / score / search / save / load and HybridRetriever)
-is preserved so callers do not change.
+Inference-only subset of the training repo's BM25:
+- Load a trained index (with on-the-fly rebuild from cached `documents` if
+  the bm25s native directory was not shipped alongside the pickle).
+- Search top-k for a query.
+- Fuse with precomputed dense scores (RRF / linear / single-stream).
 """
 
-import re
+import os
 import pickle
-from typing import List, Tuple, Optional, Dict, Any
+import re
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import bm25s
 import numpy as np
@@ -27,156 +21,116 @@ import numpy as np
 class BM25Config:
     """BM25 hyperparameters."""
 
-    k1: float = 1.5  # Term frequency saturation parameter
-    b: float = 0.75  # Length normalization parameter
+    k1: float = 1.5
+    b: float = 0.75
+
+
+_STOPWORDS = frozenset(
+    {"a", "an", "the", "is", "are", "be", "to", "of", "in", "for", "by"}
+)
+
+
+def tokenize_lean(text: str) -> List[str]:
+    """Lowercase, split on non-alphanumeric, drop stopwords + single chars."""
+    tokens = re.findall(r"[a-z0-9_]+", text.lower())
+    return [t for t in tokens if len(t) > 1 and t not in _STOPWORDS]
 
 
 class BM25Index:
-    """
-    BM25 index for premise retrieval.
+    """BM25 index for premise retrieval, backed by bm25s. Load + search only."""
 
-    Implements Okapi BM25 scoring for sparse retrieval via ``bm25s``.
-    """
-
-    _PICKLE_VERSION = "bm25s-v1"
-
-    def __init__(self, config: BM25Config = None):
+    def __init__(self, config: Optional[BM25Config] = None):
         self.config = config or BM25Config()
         self.documents: List[str] = []
-        self._tokens: List[List[str]] = []
         self._bm25: Optional[bm25s.BM25] = None
-        self._is_built = False
-
-    def tokenize(self, text: str) -> List[str]:
-        """
-        Tokenize text for BM25 indexing.
-
-        Lean4-aware: splits on common delimiters while keeping meaningful
-        alphanumeric+underscore tokens, filters stopwords.  Kept identical
-        to the pre-bm25s implementation for deterministic score parity.
-        """
-        text = text.lower()
-        tokens = re.findall(r"[a-z0-9_]+", text)
-        stopwords = {"a", "an", "the", "is", "are", "be", "to", "of", "in", "for", "by"}
-        return [t for t in tokens if len(t) > 1 and t not in stopwords]
-
-    # ------------------------------------------------------------------
-    # Indexing
-    # ------------------------------------------------------------------
-
-    def build(self, documents: List[str]) -> None:
-        """Build BM25 index from documents.
-
-        Args:
-            documents: List of premise strings (raw format)
-        """
-        self.documents = list(documents)
-        self._tokens = [self.tokenize(doc) for doc in self.documents]
-        self._build_engine()
-
-    def _build_engine(self) -> None:
-        self._bm25 = bm25s.BM25(k1=self.config.k1, b=self.config.b)
-        self._bm25.index(self._tokens, show_progress=False)
-        self._is_built = True
-
-    # ------------------------------------------------------------------
-    # Scoring / retrieval
-    # ------------------------------------------------------------------
-
-    def score(self, query: str, doc_idx: int) -> float:
-        """
-        Compute BM25 score for a query-document pair.
-
-        Kept for backward compatibility with any direct caller; internally
-        bm25s.get_scores computes the whole row, so this is O(N) — prefer
-        ``search`` when ranking over the whole corpus.
-        """
-        if not self._is_built or self._bm25 is None:
-            raise ValueError("Index not built. Call build() first.")
-        q_tokens = self.tokenize(query)
-        scores = self._bm25.get_scores(q_tokens)
-        return float(scores[doc_idx])
 
     def search(self, query: str, k: int = 10) -> Tuple[List[int], np.ndarray]:
-        """
-        Search for top-k documents matching the query.
+        """Return (top-k indices, scores) for the query."""
+        if self._bm25 is None:
+            raise ValueError("Index not loaded.")
+        if not self.documents:
+            raise ValueError(
+                "BM25 index has no documents list; refusing to search silently."
+            )
 
-        Returns:
-            Tuple of (document indices, scores), length min(k, N).
-        """
-        if not self._is_built or self._bm25 is None:
-            raise ValueError("Index not built. Call build() first.")
-
-        q_tokens = self.tokenize(query)
         actual_k = min(k, len(self.documents))
-        if actual_k == 0:
+        query_tokens = [tokenize_lean(query)]
+        if not query_tokens[0]:
             return [], np.zeros(0, dtype=np.float32)
 
         docs, scores = self._bm25.retrieve(
-            [q_tokens],
-            k=actual_k,
-            return_as="tuple",
-            show_progress=False,
+            query_tokens, k=actual_k, show_progress=False
         )
-        # bm25s returns shape [n_queries, k]; we always pass one query.
         return docs[0].tolist(), scores[0]
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
-    def save(self, path: str) -> None:
-        """Save BM25 index to disk.
-
-        We persist {config, documents, pre-tokenised docs} and rebuild the
-        bm25s engine on load (fast: single-digit seconds on 180k premises).
-        This keeps save/load a single pickle file (matches the legacy
-        interface) instead of pulling in bm25s's multi-file save format.
-        """
-        data: Dict[str, Any] = {
-            "version": self._PICKLE_VERSION,
-            "config": {"k1": self.config.k1, "b": self.config.b},
-            "documents": self.documents,
-            "tokens": self._tokens,
-        }
-        with open(path, "wb") as f:
-            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
     def load(self, path: str) -> None:
-        """Load BM25 index from disk.
+        """Load a BM25 pickle written by the training pipeline.
 
-        Accepts both the new bm25s-v1 pickle shape and the pre-bm25s
-        legacy shape (dict with doc_freqs / term_freqs / idf_cache etc.).
-        Legacy pickles get auto-migrated by retokenising from their
-        documents list.
+        Two formats supported:
+        1. `bm25s` native dir referenced by `meta["dir"]` — fastest reload.
+        2. Pickle carrying `documents` only — rebuild the bm25s engine in
+           memory from the documents list.
         """
         with open(path, "rb") as f:
-            data = pickle.load(f)
+            meta = pickle.load(f)
 
-        self.config = BM25Config(**data["config"])
-        self.documents = list(data.get("documents", []))
+        self.config = self._extract_config(meta)
+        self.documents = self._extract_documents(meta)
 
-        if data.get("version") == self._PICKLE_VERSION and "tokens" in data:
-            self._tokens = data["tokens"]
-        else:
-            # Legacy pickle (doc_freqs/term_freqs/idf_cache keys) —
-            # the pre-tokenised stream wasn't stored, so retokenise
-            # from the documents to feed bm25s.
-            self._tokens = [self.tokenize(doc) for doc in self.documents]
+        save_dir = (
+            meta.get("dir", path + ".bm25s")
+            if isinstance(meta, dict)
+            else (path + ".bm25s")
+        )
+        if os.path.isdir(save_dir):
+            self._bm25 = bm25s.BM25.load(save_dir)
+            if not self.documents:
+                raise ValueError(
+                    f"BM25 native index loaded from {save_dir} but its sidecar pickle "
+                    f"{path} carries no `documents` list; refusing to serve a "
+                    "silently-empty BM25 stream."
+                )
+            return
 
-        self._build_engine()
+        if not self.documents:
+            raise ValueError(
+                "BM25 pickle has neither a bm25s directory nor a documents list."
+            )
+
+        corpus_tokens = [tokenize_lean(doc) for doc in self.documents]
+        self._bm25 = bm25s.BM25(k1=self.config.k1, b=self.config.b)
+        self._bm25.index(corpus_tokens, show_progress=False)
+
+    @staticmethod
+    def _extract_config(meta: Any) -> BM25Config:
+        default = BM25Config()
+        if isinstance(meta, dict):
+            if "k1" in meta or "b" in meta:
+                return BM25Config(
+                    k1=float(meta.get("k1", default.k1)),
+                    b=float(meta.get("b", default.b)),
+                )
+            legacy = meta.get("config")
+            if isinstance(legacy, BM25Config):
+                return legacy
+            if isinstance(legacy, dict):
+                return BM25Config(
+                    k1=float(legacy.get("k1", default.k1)),
+                    b=float(legacy.get("b", default.b)),
+                )
+        return default
+
+    @staticmethod
+    def _extract_documents(meta: Any) -> List[str]:
+        if isinstance(meta, dict):
+            documents = meta.get("documents")
+            if isinstance(documents, list):
+                return documents
+        return []
 
 
 class HybridRetriever:
-    """
-    Hybrid retriever combining dense (sentence encoder) and sparse (BM25) retrieval.
-
-    Supports multiple fusion strategies:
-    - "rrf": Reciprocal Rank Fusion (recommended)
-    - "linear": Linear combination of normalized scores
-    - "dense_only": Use only dense retrieval (original behavior)
-    - "bm25_only": Use only BM25 retrieval
-    """
+    """Dense + sparse fusion: RRF (default), linear, or single-stream."""
 
     def __init__(
         self,
@@ -185,15 +139,6 @@ class HybridRetriever:
         bm25_weight: float = 0.3,
         rrf_k: int = 60,
     ):
-        """
-        Initialize hybrid retriever.
-
-        Args:
-            fusion_method: One of "rrf", "linear", "dense_only", "bm25_only"
-            dense_weight: Weight for dense scores in linear fusion
-            bm25_weight: Weight for BM25 scores in linear fusion
-            rrf_k: Constant k for RRF formula (default 60)
-        """
         self.fusion_method = fusion_method
         self.dense_weight = dense_weight
         self.bm25_weight = bm25_weight
@@ -201,91 +146,85 @@ class HybridRetriever:
         self.bm25_index: Optional[BM25Index] = None
 
     def set_bm25_index(self, index: BM25Index) -> None:
-        """Attach a pre-built BM25 index."""
         self.bm25_index = index
 
     def retrieve(
-        self, query: str, dense_scores: np.ndarray, k: int
+        self,
+        query: str,
+        dense_scores: np.ndarray,
+        k: int,
     ) -> Tuple[List[int], np.ndarray]:
-        """
-        Perform hybrid retrieval.
+        n_docs = len(dense_scores)
+        dense_k = min(k * 2, n_docs)
+        dense_top_indices = np.argsort(dense_scores)[-dense_k:][::-1]
+        dense_top_scores = dense_scores[dense_top_indices]
 
-        Args:
-            query: Query string for BM25
-            dense_scores: Dense similarity scores (shape: [num_docs])
-            k: Number of top results
-
-        Returns:
-            Tuple of (top_k_indices, top_k_scores)
-        """
         if self.fusion_method == "dense_only" or self.bm25_index is None:
-            # Fall back to dense-only
-            actual_k = min(k, len(dense_scores))
-            top_k_indices = np.argsort(dense_scores)[-actual_k:][::-1]
-            top_k_scores = dense_scores[top_k_indices]
-            return top_k_indices.tolist(), top_k_scores
-
-        # Get BM25 scores for all documents
-        bm25_indices, bm25_scores_top = self.bm25_index.search(query, len(dense_scores))
-
-        # Build full BM25 score array
-        bm25_scores = np.zeros(len(dense_scores), dtype=np.float32)
-        for idx, score in zip(bm25_indices, bm25_scores_top):
-            bm25_scores[idx] = score
-
+            return dense_top_indices[:k].tolist(), dense_top_scores[:k]
         if self.fusion_method == "bm25_only":
-            actual_k = min(k, len(bm25_scores))
-            top_k_indices = np.argsort(bm25_scores)[-actual_k:][::-1]
-            top_k_scores = bm25_scores[top_k_indices]
-            return top_k_indices.tolist(), top_k_scores
+            return self.bm25_index.search(query, k)
 
-        elif self.fusion_method == "rrf":
-            return self._rrf_fusion(dense_scores, bm25_scores, k)
+        bm25_indices, bm25_scores = self.bm25_index.search(query, dense_k)
 
-        elif self.fusion_method == "linear":
-            return self._linear_fusion(dense_scores, bm25_scores, k)
+        if self.fusion_method == "rrf":
+            return self._fuse_rrf(
+                dense_top_indices.tolist(),
+                bm25_indices,
+                k,
+            )
+        if self.fusion_method == "linear":
+            return self._fuse_linear(
+                dense_top_indices.tolist(),
+                dense_top_scores,
+                bm25_indices,
+                bm25_scores,
+                k,
+                n_docs,
+            )
+        raise ValueError(f"Unknown fusion method: {self.fusion_method}")
 
-        else:
-            raise ValueError(f"Unknown fusion method: {self.fusion_method}")
-
-    def _rrf_fusion(
-        self, dense_scores: np.ndarray, bm25_scores: np.ndarray, k: int
+    def _fuse_rrf(
+        self,
+        dense_indices: List[int],
+        bm25_indices: List[int],
+        k: int,
     ) -> Tuple[List[int], np.ndarray]:
-        """Reciprocal Rank Fusion."""
-        # Get rankings (higher score = better rank)
-        dense_ranks = np.argsort(np.argsort(-dense_scores))
-        bm25_ranks = np.argsort(np.argsort(-bm25_scores))
+        dense_ranks = {idx: rank for rank, idx in enumerate(dense_indices)}
+        bm25_ranks = {idx: rank for rank, idx in enumerate(bm25_indices)}
 
-        # RRF score: sum of 1/(rank + k) for each retriever
-        rrf_scores = 1.0 / (dense_ranks + self.rrf_k + 1) + 1.0 / (
-            bm25_ranks + self.rrf_k + 1
-        )
+        scores: Dict[int, float] = {}
+        for idx in set(dense_indices) | set(bm25_indices):
+            s = 0.0
+            if idx in dense_ranks:
+                s += self.dense_weight / (self.rrf_k + dense_ranks[idx])
+            if idx in bm25_ranks:
+                s += self.bm25_weight / (self.rrf_k + bm25_ranks[idx])
+            scores[idx] = s
 
-        actual_k = min(k, len(rrf_scores))
-        top_k_indices = np.argsort(rrf_scores)[-actual_k:][::-1]
-        top_k_scores = rrf_scores[top_k_indices]
+        top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]
+        return [i for i, _ in top], np.array([s for _, s in top])
 
-        return top_k_indices.tolist(), top_k_scores
-
-    def _linear_fusion(
-        self, dense_scores: np.ndarray, bm25_scores: np.ndarray, k: int
+    def _fuse_linear(
+        self,
+        dense_indices: List[int],
+        dense_scores: np.ndarray,
+        bm25_indices: List[int],
+        bm25_scores: np.ndarray,
+        k: int,
+        n_docs: int,
     ) -> Tuple[List[int], np.ndarray]:
-        """Linear combination of normalized scores."""
+        def normalize(scores: np.ndarray) -> np.ndarray:
+            if len(scores) == 0 or scores.max() == scores.min():
+                return scores
+            return (scores - scores.min()) / (scores.max() - scores.min())
 
-        # Min-max normalize both score arrays
-        def normalize(scores):
-            min_s, max_s = scores.min(), scores.max()
-            if max_s - min_s > 1e-9:
-                return (scores - min_s) / (max_s - min_s)
-            return np.zeros_like(scores)
+        full_dense = np.zeros(n_docs)
+        full_bm25 = np.zeros(n_docs)
+        for idx, s in zip(dense_indices, normalize(dense_scores)):
+            full_dense[idx] = s
+        for idx, s in zip(bm25_indices, normalize(bm25_scores)):
+            full_bm25[idx] = s
 
-        norm_dense = normalize(dense_scores)
-        norm_bm25 = normalize(bm25_scores)
-
-        combined = self.dense_weight * norm_dense + self.bm25_weight * norm_bm25
-
-        actual_k = min(k, len(combined))
-        top_k_indices = np.argsort(combined)[-actual_k:][::-1]
-        top_k_scores = combined[top_k_indices]
-
-        return top_k_indices.tolist(), top_k_scores
+        combined = self.dense_weight * full_dense + self.bm25_weight * full_bm25
+        top_indices = np.argsort(combined)[-k:][::-1]
+        return top_indices.tolist(), combined[top_indices]

@@ -1,6 +1,11 @@
-"""Core helpers for LeanSATP runtime."""
+"""Core utilities: premise + BM25 retrieval."""
 
+from .bm25 import BM25Config, BM25Index, HybridRetriever
 from .premise import Premise
-from .bm25 import BM25Index, BM25Config, HybridRetriever
 
-__all__ = ["Premise", "BM25Index", "BM25Config", "HybridRetriever"]
+__all__ = [
+    "Premise",
+    "BM25Index",
+    "BM25Config",
+    "HybridRetriever",
+]
