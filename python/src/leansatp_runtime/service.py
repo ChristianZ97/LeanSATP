@@ -317,7 +317,7 @@ def log_server(
     print(f"{prefix} {message}", file=stream)
 
 
-_TRAINED_CHECKPOINT_REPO = "ChristianZ97/SATP-aesop-policy-xatten"
+_TRAINED_CHECKPOINT_REPO = "ChristianZ97/satp-policy-goal"
 
 
 def _expected_lemma_k() -> int:
