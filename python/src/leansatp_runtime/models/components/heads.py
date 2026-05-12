@@ -13,30 +13,70 @@ import torch.nn.functional as F
 
 # Tactic vocabulary (head ordering must match the trained checkpoint).
 SAFE_TACTICS = (
-    "ring",
     "abel",
+    "push_neg",
+    "zify",
+    "ring",
+    "field_simp",
     "norm_num",
     "norm_cast",
-    "push_neg",
-    "field_simp",
-    "zify",
 )
 
 UNSAFE_TACTICS = (
-    "linarith",
-    "nlinarith",
-    "omega",
     "gcongr",
-    "positivity",
     "interval_cases",
     "ext",
     "exfalso",
     "split",
+    "linarith",
+    "nlinarith",
+    "positivity",
+    "omega",
+    "ring_nf",
+    "ring_nf at *",
+    "simp",
+    "simp_all",
+    "field_simp [*] at *",
+    "norm_num [*] at *",
+    "norm_cast at *",
+    "bound",
 )
 
 NUM_PRIORITY_LEVELS = 5
-HEAD_ATTN_HEADS = 1
+HEAD_ATTN_HEADS = 4
 DEFAULT_LEMMA_K = 8
+
+CONFIG_LEVEL_KEYS = (
+    "maxRuleApplicationDepth",
+    "maxRuleApplications",
+    "maxNormIterations",
+    "maxGoals",
+)
+
+CONFIG_BINARY_KEYS = (
+    "enableSimp",
+    "useSimpAll",
+    "enableUnfold",
+    "useDefaultSimpSet",
+)
+
+DEFAULT_AESOP_CONFIG = {
+    "maxRuleApplicationDepth": 30,
+    "maxRuleApplications": 200,
+    "maxNormIterations": 100,
+    "maxGoals": None,
+    "enableSimp": True,
+    "useSimpAll": True,
+    "enableUnfold": True,
+    "useDefaultSimpSet": True,
+}
+
+LEVEL_VALUES = {
+    "maxRuleApplicationDepth": [30, 50, 70, 90, 110],
+    "maxRuleApplications": [200, 220, 240, 260, 280],
+    "maxNormIterations": [100, 120, 140, 160, 180],
+    "maxGoals": [None, 256, 128, 64, 32],
+}
 
 
 class GroupHeadAttention(nn.Module):
@@ -94,18 +134,29 @@ class TacticHeads(nn.Module):
 
 
 class ConfigHeads(nn.Module):
-    """Aesop configuration heads: 3 level heads + 2 binary heads."""
+    """Aesop configuration heads: 4 level heads + 4 binary heads.
+
+    Plan F (2026-04-27 in trainer): level covers
+    ``CONFIG_LEVEL_KEYS = (maxRuleApplicationDepth, maxRuleApplications,
+    maxNormIterations, maxGoals)``; binary covers
+    ``CONFIG_BINARY_KEYS = (enableSimp, useSimpAll, enableUnfold,
+    useDefaultSimpSet)``.
+    """
 
     def __init__(
         self, hidden_size: int, num_priority_levels: int = NUM_PRIORITY_LEVELS
     ):
         super().__init__()
+        n_level = len(CONFIG_LEVEL_KEYS)
+        n_binary = len(CONFIG_BINARY_KEYS)
         self.heads = nn.ModuleDict(
             {
                 "level": nn.ModuleList(
-                    [nn.Linear(hidden_size, num_priority_levels) for _ in range(3)]
+                    [nn.Linear(hidden_size, num_priority_levels) for _ in range(n_level)]
                 ),
-                "binary": nn.ModuleList([nn.Linear(hidden_size, 1) for _ in range(2)]),
+                "binary": nn.ModuleList(
+                    [nn.Linear(hidden_size, 1) for _ in range(n_binary)]
+                ),
             }
         )
 

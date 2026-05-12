@@ -4,19 +4,14 @@ from typing import List, Optional
 
 from ..core import Premise
 from ..core.premise import premise_name
-from .components.heads import SAFE_TACTICS, UNSAFE_TACTICS
-
-# Default Aesop config (referenced when level/binary actions are absent).
-_DEFAULT_AESOP_CONFIG = {
-    "maxRuleApplicationDepth": 30,
-    "maxRuleApplications": 200,
-    "maxNormIterations": 100,
-    "enableSimp": True,
-    "useSimpAll": True,
-}
-
-# Config levels are offset in steps of LEVEL_STEP from the default.
-_LEVEL_STEP = 20
+from .components.heads import (
+    CONFIG_BINARY_KEYS,
+    CONFIG_LEVEL_KEYS,
+    DEFAULT_AESOP_CONFIG,
+    LEVEL_VALUES,
+    SAFE_TACTICS,
+    UNSAFE_TACTICS,
+)
 
 
 def _to_list(x):
@@ -38,6 +33,11 @@ def to_lean4_string(
 
     `tactic_name` lets callers emit `satp (config := …)` for the SATP tactic
     cascade while keeping the same configuration grammar as plain `aesop`.
+
+    Config-emission follows the trainer's skip-when-default canonical form:
+    only fields whose value differs from ``DEFAULT_AESOP_CONFIG[key]`` are
+    written into the config block, so the tactic string round-trips losslessly
+    through the buffer's ``from_lean4_string``.
     """
     if not tactic_name or not tactic_name.strip():
         raise ValueError("tactic_name must be a non-empty string")
@@ -49,43 +49,45 @@ def to_lean4_string(
     config_level_actions = _to_list(config_level_actions)
     config_binary_actions = _to_list(config_binary_actions)
 
-    if config_level_actions is not None and len(config_level_actions) >= 3:
-        max_depth = (
-            _DEFAULT_AESOP_CONFIG["maxRuleApplicationDepth"]
-            + _LEVEL_STEP * config_level_actions[0]
-        )
-        max_apps = (
-            _DEFAULT_AESOP_CONFIG["maxRuleApplications"]
-            + _LEVEL_STEP * config_level_actions[1]
-        )
-        max_norm = (
-            _DEFAULT_AESOP_CONFIG["maxNormIterations"]
-            + _LEVEL_STEP * config_level_actions[2]
-        )
-    else:
-        max_depth = _DEFAULT_AESOP_CONFIG["maxRuleApplicationDepth"]
-        max_apps = _DEFAULT_AESOP_CONFIG["maxRuleApplications"]
-        max_norm = _DEFAULT_AESOP_CONFIG["maxNormIterations"]
+    level_values: dict = {}
+    for i, key in enumerate(CONFIG_LEVEL_KEYS):
+        if config_level_actions is not None and i < len(config_level_actions):
+            level_values[key] = LEVEL_VALUES[key][int(config_level_actions[i])]
+        else:
+            level_values[key] = DEFAULT_AESOP_CONFIG[key]
 
-    if config_binary_actions is not None and len(config_binary_actions) >= 2:
-        enable_simp = bool(config_binary_actions[0])
-        use_simp_all = bool(config_binary_actions[1])
-    else:
-        enable_simp = _DEFAULT_AESOP_CONFIG["enableSimp"]
-        use_simp_all = _DEFAULT_AESOP_CONFIG["useSimpAll"]
+    binary_values: dict = {}
+    for i, key in enumerate(CONFIG_BINARY_KEYS):
+        if config_binary_actions is not None and i < len(config_binary_actions):
+            binary_values[key] = bool(config_binary_actions[i])
+        else:
+            binary_values[key] = bool(DEFAULT_AESOP_CONFIG[key])
 
-    aesop_config = f"""  {tactic_name} (config := {{
-    maxRuleApplicationDepth := {max_depth}
-    maxRuleApplications     := {max_apps}
-    maxNormIterations       := {max_norm}
-    enableSimp              := {"true" if enable_simp else "false"}
-    useSimpAll              := {"true" if use_simp_all else "false"}
-  }})"""
+    config_lines: List[str] = []
+    for key in CONFIG_LEVEL_KEYS:
+        v = level_values[key]
+        default = DEFAULT_AESOP_CONFIG[key]
+        if v is None and default is None:
+            continue
+        if v == default:
+            continue
+        config_lines.append(f"    {key:<23} := {v}")
+    for key in CONFIG_BINARY_KEYS:
+        v = binary_values[key]
+        if v == DEFAULT_AESOP_CONFIG[key]:
+            continue
+        config_lines.append(f"    {key:<23} := {'true' if v else 'false'}")
+
+    if not config_lines:
+        aesop_config = f"  {tactic_name}"
+    else:
+        body = "\n".join(config_lines)
+        aesop_config = f"  {tactic_name} (config := {{\n{body}\n  }})"
 
     rule_entries: List[tuple] = []
 
     # Safe rules: priority 0 = disabled, 1-4 → Lean priority 4,3,2,1.
-    for idx, priority in enumerate(safe_actions):
+    for idx, priority in enumerate(safe_actions or []):
         if priority > 0:
             name = SAFE_TACTICS[idx]
             rule = f"    (add safe {5 - priority} (by {name}))"
@@ -93,7 +95,7 @@ def to_lean4_string(
 
     # Unsafe rules: priority 0 disabled, 1-4 → 70/80/90/100%.
     UNSAFE_PROB = {1: 70, 2: 80, 3: 90, 4: 100}
-    for idx, priority in enumerate(unsafe_actions):
+    for idx, priority in enumerate(unsafe_actions or []):
         if priority > 0:
             name = UNSAFE_TACTICS[idx]
             rule = f"    (add unsafe {UNSAFE_PROB[priority]}% (by {name}))"
