@@ -79,13 +79,19 @@ def apply_lora_to_model(
     model: nn.Module,
     config: LoRAConfig,
 ) -> Tuple[nn.Module, List[str]]:
-    """Replace target Linear layers in `model` with `LoRALayer` wrappers."""
+    """Replace target Linear layers in `model` with `LoRALayer` wrappers.
+
+    Match on the immediate attribute name only — substring on the full
+    path over-matches single-letter T5 targets like "o"/"k" against
+    "enc*o*der"/"bloc*k*", which silently wraps every FFN linear too.
+    See SATP-Training commit 8e18ad1 (`fix(model): LoRA over-config`)
+    where the same bug was fixed on the training side.
+    """
     adapted: List[str] = []
     targets = tuple(t.lower() for t in config.target_modules)
 
-    def _hit(name: str, full: str) -> bool:
-        n, f = name.lower(), full.lower()
-        return any(t == n or t in f for t in targets)
+    def _hit(name: str) -> bool:
+        return name.lower() in targets
 
     def _walk(module: nn.Module, prefix: str = "") -> None:
         for name, child in module.named_children():
@@ -97,7 +103,7 @@ def apply_lora_to_model(
                 and not list(child.children())
             )
             if is_linear:
-                if _hit(name, full):
+                if _hit(name):
                     setattr(
                         module,
                         name,
