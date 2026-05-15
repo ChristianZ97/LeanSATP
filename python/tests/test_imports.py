@@ -22,10 +22,13 @@ class FlatConstantHomesTests(unittest.TestCase):
         )
 
         # Head counts are checkpoint-locked: changing them requires retraining.
+        # Aligned with ChristianZ97/satp-policy-goal post-2026-05 schema:
+        # UNSAFE pool widened 9→17, HEAD_ATTN_HEADS bumped 1→4 (Plan F bump
+        # in SATP-Training/src/aesop/config/hyperparameters.py:60).
         self.assertEqual(len(SAFE_TACTICS), 7)
-        self.assertEqual(len(UNSAFE_TACTICS), 9)
+        self.assertEqual(len(UNSAFE_TACTICS), 17)
         self.assertEqual(NUM_PRIORITY_LEVELS, 5)
-        self.assertEqual(HEAD_ATTN_HEADS, 1)
+        self.assertEqual(HEAD_ATTN_HEADS, 4)
         self.assertEqual(DEFAULT_LEMMA_K, 8)
 
     def test_premise_encoder_max_sequence_length(self) -> None:
@@ -33,7 +36,7 @@ class FlatConstantHomesTests(unittest.TestCase):
             MAX_SEQUENCE_LENGTH,
         )
 
-        self.assertEqual(MAX_SEQUENCE_LENGTH, 4096)
+        self.assertEqual(MAX_SEQUENCE_LENGTH, 1024)
 
     def test_lora_defaults_match_trained_checkpoint(self) -> None:
         from leansatp_runtime.models.components.lora_adapter import LoRAConfig
