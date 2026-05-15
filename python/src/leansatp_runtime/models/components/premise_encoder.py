@@ -4,8 +4,14 @@ from typing import List
 
 import torch
 
-# ByT5 is byte-level: sequences need a long max_length to fit Lean theorems.
-MAX_SEQUENCE_LENGTH = 4096
+# ByT5 byte-level encoder; cap aligned with SATP-Training's
+# `MAX_SEQUENCE_LENGTH = 1024` (hyperparameters.py:65 — itself aligned with
+# ReProver upstream's LeanDojo retriever pretraining geometry). The training
+# distribution is byte-truncated at 1024; inference must match or the model
+# sees out-of-distribution longer sequences where the per-byte positional
+# encoding was never optimised, silently degrading both `policy_tactic`
+# tokenisation (service.py:562) and premise CLS encoding (encode below).
+MAX_SEQUENCE_LENGTH = 1024
 _DEFAULT_BATCH_SIZE = 16
 
 
