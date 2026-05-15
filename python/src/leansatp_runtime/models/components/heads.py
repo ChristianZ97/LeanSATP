@@ -152,7 +152,10 @@ class ConfigHeads(nn.Module):
         self.heads = nn.ModuleDict(
             {
                 "level": nn.ModuleList(
-                    [nn.Linear(hidden_size, num_priority_levels) for _ in range(n_level)]
+                    [
+                        nn.Linear(hidden_size, num_priority_levels)
+                        for _ in range(n_level)
+                    ]
                 ),
                 "binary": nn.ModuleList(
                     [nn.Linear(hidden_size, 1) for _ in range(n_binary)]
