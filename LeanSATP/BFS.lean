@@ -61,5 +61,5 @@ macro "bfsaesop" : tactic =>
   `(tactic|
       set_option LeanCopilot.suggest_tactics.model "ByteDance-Seed/BFS-Prover-V2-7B" in
       aesop?
-        (config := { maxGoals := 64, bfsScore := true, terminal := true })
+        (config := { enableSimp := false, enableUnfold := false, maxGoals := 64, bfsScore := true, terminal := true })
         (rule_sets := [bfs, -builtin, -default]))
