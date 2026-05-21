@@ -53,5 +53,56 @@ class FlatConstantHomesTests(unittest.TestCase):
             import leansatp_runtime.config  # noqa: F401
 
 
+class LoRATargetAutoDetectTests(unittest.TestCase):
+    """Pin auto-detection of LoRA target_modules from the checkpoint layout.
+
+    Older `satp-policy-goal` checkpoints (pre 2026-05-21) trained LoRA on
+    both attention and FF; the `only_DPO_RL` regime folds FF weights back
+    into plain Linears. The runtime must reproduce the same wrapper layout
+    the checkpoint was trained against, or `load_state_dict` mismatches.
+    """
+
+    def _detect(self, state_dict):
+        from leansatp_runtime.service import _detect_lora_targets, _ensure_imports
+
+        _ensure_imports()
+        return _detect_lora_targets(state_dict)
+
+    def test_new_format_returns_attention_only(self) -> None:
+        sd = {
+            "base.encoder.block.0.layer.0.SelfAttention.q.lora_A": None,
+            "base.encoder.block.0.layer.0.SelfAttention.q.lora_B": None,
+            "base.encoder.block.0.layer.0.SelfAttention.q.original_layer.weight": None,
+            "base.encoder.block.0.layer.1.DenseReluDense.wi_0.weight": None,
+            "base.encoder.block.0.layer.1.DenseReluDense.wi_1.weight": None,
+            "base.encoder.block.0.layer.1.DenseReluDense.wo.weight": None,
+        }
+        self.assertEqual(self._detect(sd), ("q", "k", "v", "o"))
+
+    def test_legacy_ff_lora_format_extends_targets(self) -> None:
+        sd = {
+            "base.encoder.block.0.layer.0.SelfAttention.q.lora_A": None,
+            "base.encoder.block.0.layer.1.DenseReluDense.wi_0.lora_A": None,
+            "base.encoder.block.0.layer.1.DenseReluDense.wi_0.lora_B": None,
+            "base.encoder.block.0.layer.1.DenseReluDense.wi_0.original_layer.weight": None,
+            "base.encoder.block.0.layer.1.DenseReluDense.wi_1.lora_A": None,
+            "base.encoder.block.0.layer.1.DenseReluDense.wo.lora_A": None,
+        }
+        self.assertEqual(
+            self._detect(sd),
+            ("q", "k", "v", "o", "wi_0", "wi_1", "wo"),
+        )
+
+    def test_partial_ff_lora_still_extends_targets(self) -> None:
+        """One `wi_0.lora_A` anywhere is enough to flip into legacy mode.
+
+        A partial-wrap checkpoint is malformed, but the loader's job is to
+        reproduce whatever wrapper layout the keys imply; ``strict`` load
+        validation will catch the residual key mismatch downstream.
+        """
+        sd = {"base.encoder.block.7.layer.1.DenseReluDense.wi_0.lora_A": None}
+        self.assertIn("wi_0", self._detect(sd))
+
+
 if __name__ == "__main__":
     unittest.main()
