@@ -626,6 +626,18 @@ def policy_tactic(
     config_level = config_logits["level"][0].argmax(dim=-1).tolist()
     config_binary = (config_logits["binary"][0].squeeze(-1) > 0).int().tolist()
 
+    # --- SATP component ablation (default OFF; leave-one-out study) ---
+    # Each flag nulls exactly one emitted component so the rest of the config
+    # is identical to the full model. Read per-call from env; with no flag set
+    # this path is byte-identical to the unablated emit (live services unaffected).
+    if os.environ.get("SATP_ABLATE_RETRIEVAL") == "1":
+        lemma_actions = [0] * len(lemma_actions)        # drop lemma/premise rules
+    if os.environ.get("SATP_ABLATE_TACTIC_PRIO") == "1":
+        safe_actions = [0] * len(safe_actions)          # drop learned safe rules
+        unsafe_actions = [0] * len(unsafe_actions)      # drop learned unsafe rules
+    if os.environ.get("SATP_ABLATE_BUDGET") == "1":
+        config_level = None                             # -> DEFAULT_AESOP_CONFIG budget
+
     tactic = _to_lean4_string(
         safe_actions=safe_actions,
         unsafe_actions=unsafe_actions,
