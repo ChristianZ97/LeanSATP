@@ -15,7 +15,7 @@ dependencies = [
     "rich>=13.0.0",
     "torch==2.5.1",
     "tqdm",
-    "transformers>=4.0.0",
+    "transformers>=4.44,<5",
 ]
 
 [tool.setuptools.package-dir]
