@@ -203,7 +203,7 @@ call; cost is negligible vs the HTTP round-trip).
     gap-level finetune experiments where the model is retrained on
     bare goal-state inputs.
 
-Codex pt.8 Finding 2 (retry alternate mode before fail) intentionally
+Retrying the alternate mode before failing is intentionally
 NOT implemented: the retry would double HTTP latency for every failed
 policy call, and per-call `satp_input_mode=...` telemetry already gives
 downstream analysis the signal to compute per-mode pass rate post-hoc.
@@ -226,7 +226,7 @@ private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array 
       names := names.push id.getId.toString
     | _ =>
       throwError "satp only supports identifier lemmas in [ ... ], got: {term}"
-  -- Codex pt.8 Finding 1 remediation: surface the discard so callers
+  -- Surface the discard so callers
   -- don't silently rely on hint threading that no longer reaches the
   -- model or aesop rules. Compile-time warning is visible in IDE/CI
   -- without hard-erroring on existing call sites (pipeline wrappers
