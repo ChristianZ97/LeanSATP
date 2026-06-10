@@ -4,7 +4,7 @@ Original LoRA weights live in the trained checkpoint; here we only need to
 reconstruct the same module hierarchy so `model.load_state_dict` finds the
 expected `lora_A` / `lora_B` keys, then forward-pass through them.
 
-Defaults below match the trained `SATP-aesop-policy-xatten` checkpoint.
+Defaults below match the trained `ChristianZ97/satp-policy-goal` checkpoint.
 """
 
 from dataclasses import dataclass

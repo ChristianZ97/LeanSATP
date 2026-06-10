@@ -343,33 +343,6 @@ def _validate_checkpoint_shape(state_dict) -> None:
         )
 
 
-# T5 feed-forward sub-layer linears live at `…DenseReluDense.{wi_0,wi_1,wo}`.
-# Training regimes through 2026-05 LoRA-wrapped them alongside attention; the
-# `only_DPO_RL` regime folded the wrapped FF weights back into plain Linears
-# before upload. The runtime auto-detects which format is on disk so both
-# layouts load without an explicit config flag.
-_FF_LORA_NAMES = ("wi_0", "wi_1", "wo")
-
-
-def _detect_lora_targets(state_dict) -> tuple[str, ...]:
-    """Return LoRA target_modules that reproduce the checkpoint's wrapper layout.
-
-    Default (attention-only) matches current training. When FF sub-layers ship
-    LoRA-decomposed keys (older checkpoints), extend targets to include
-    ``wi_0/wi_1/wo`` so module construction recreates the same wrapper
-    hierarchy and ``load_state_dict`` finds every key.
-    """
-    targets = list(_LoRAConfig().target_modules)
-    has_ff_lora = any(
-        f".DenseReluDense.{name}.lora_A" in key
-        for key in state_dict
-        for name in _FF_LORA_NAMES
-    )
-    if has_ff_lora:
-        targets.extend(_FF_LORA_NAMES)
-    return tuple(targets)
-
-
 def _validate_state_dict_load(incompatible_keys) -> None:
     """Reject a state_dict load that is not a perfect parameter-name match."""
     missing = list(incompatible_keys.missing_keys)
@@ -394,17 +367,10 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
     state_dict = ckpt.get("model_state_dict", ckpt)
     _validate_checkpoint_shape(state_dict)
 
-    lora_targets = _detect_lora_targets(state_dict)
-    if set(lora_targets) != set(_LoRAConfig().target_modules):
-        log_server(
-            "INFO",
-            f"[LeanSATP] checkpoint LoRA targets: {lora_targets} (legacy FF-LoRA detected)",
-        )
-
     with _suppress_startup_noise():
         model = _AesopPolicy(
             use_lora=True,
-            lora_config=_LoRAConfig(target_modules=lora_targets),
+            lora_config=_LoRAConfig(),
             device=device,
             cache_dir=cache_dir,
         )
