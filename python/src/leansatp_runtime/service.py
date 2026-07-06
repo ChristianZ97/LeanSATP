@@ -34,9 +34,12 @@ DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 # ``cache_dir/<basename>`` so ``policy.py``'s ``load_premise_embeddings``
 # (which reads ``cache_dir/premise_embeddings.npy`` etc.) finds them.
 DEFAULT_RETRIEVAL_FILES = (
-    "premises/premise_embeddings.npy",
+    "premises/premise_embeddings.npy",  # v1 (satp-policy-goal) layout
     "premises/premises_raw.npy",
     "premises/bm25_index.pkl",
+    "cache/premise_embeddings.npy",  # v2 (satp-policy-v2) layout; absent names skip silently
+    "cache/mathlib4_premises.txt",
+    # names flatten to basenames — don't point two ckpt generations at one cache dir
 )
 
 _torch = None
@@ -392,6 +395,32 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
 
     ckpt = _torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
+
+    # v2 ckpts carry tactic_heads.tactic_emb, v1 tactic_heads.safe_group.*;
+    # route on the fingerprint (same spirit as the FF-LoRA auto-detect below).
+    if "tactic_heads.tactic_emb" in state_dict:
+        from leansatp_runtime.models import policy_v2 as _pv2
+
+        log_server(
+            "INFO",
+            "[LeanSATP] v2 checkpoint detected (factored joint-action heads); "
+            "using policy_v2 runtime",
+        )
+        with _suppress_startup_noise():
+            model = _pv2.build_policy_v2(ckpt, cache_dir, device=device)
+        try:
+            model.load_premise_embeddings()
+            retrieval_enabled = True
+        except FileNotFoundError as exc:
+            retrieval_enabled = False
+            log_server(
+                "INFO",
+                f"[LeanSATP] Retrieval disabled: {exc}",
+            )
+        model.to(device)
+        model.eval()
+        return model, device, retrieval_enabled
+
     _validate_checkpoint_shape(state_dict)
 
     lora_targets = _detect_lora_targets(state_dict)
@@ -579,11 +608,30 @@ def policy_tactic(
     tactic_name: str = "aesop",
     user_lemmas: Optional[list[str]] = None,
     user_lemma_priority: Optional[int] = None,
+    strip_retrieval: bool = False,
 ) -> str:
-    """Generate a LeanSATP tactic by greedy policy inference."""
+    """Greedy policy inference. ``strip_retrieval`` only acts here for v2
+    (decode-time); the v1 path ignores it and keeps the caller-side text strip."""
     _ensure_imports()
 
     model, device, retrieval_enabled = model_and_device
+
+    if getattr(model, "arch", "v1") == "v2":
+        from leansatp_runtime.models import policy_v2 as _pv2
+
+        tactic = _pv2.policy_tactic_v2(
+            model,
+            device,
+            formal_statement,
+            retrieval_enabled=retrieval_enabled,
+            tactic_name=tactic_name,
+            strip_retrieval=strip_retrieval,
+        )
+        kwargs: dict = {}
+        if user_lemma_priority is not None:
+            kwargs["priority_pct"] = user_lemma_priority
+        return append_user_lemmas(tactic, user_lemmas, **kwargs)
+
     top_k_premises = None
     lemma_scores = None
     lemma_embs = None
@@ -732,7 +780,7 @@ class SATPInferenceEngine:
         # Run the policy WITHOUT appending user lemmas; user_lemma append
         # and retrieval strip are handled below so the order is explicit:
         #   policy output  →  (optional) strip retrieval rules  →  append hints
-        policy_kwargs = dict(tactic_name=tactic_name)
+        policy_kwargs = dict(tactic_name=tactic_name, strip_retrieval=strip_retrieval)
         with self._lock:
             try:
                 tactic = policy_tactic(
