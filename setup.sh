@@ -137,6 +137,7 @@ if [ "${SKIP_SATP_CKPT:-0}" = 1 ]; then
   echo "  SKIP_SATP_CKPT=1 — skipping"
 elif [ "$FORCE" = 1 ] || [ ! -f "$SATP_CACHE_DIR/best_checkpoint.pt" ]; then
   uv run -m leansatp_runtime.service --download-only \
+    --checkpoint "$SATP_CACHE_DIR/best_checkpoint.pt" \
     --checkpoint-source "$SATP_CKPT_SOURCE" --cache-dir "$SATP_CACHE_DIR"
   [ -f "$SATP_CACHE_DIR/best_checkpoint.pt" ] || die "checkpoint download failed"
 else echo "  already present — skip"; fi
