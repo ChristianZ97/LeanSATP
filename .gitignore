@@ -12,3 +12,5 @@ python/src/*.egg-info/
 uv.lock
 **/__pycache__/
 .DS_Store
+deps/
+deps/_lc_build.log
