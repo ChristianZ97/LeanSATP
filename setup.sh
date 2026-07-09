@@ -154,6 +154,6 @@ else echo "  already present — skip"; fi
 log "STANDALONE v4.26 ENV READY — satp + bfsaesop build on v4.26"
 cat <<EOF
 
-  CT2 lib dir (export for the eval pipeline / bfsaesop runtime):
-    export SATP_LEANCOPILOT_LIB_DIR=$CT2LIB
+  CTranslate2 load/link paths are embedded in the generated Lake environment.
+  No SATP_LEANCOPILOT_LIB_DIR or LD_LIBRARY_PATH export is required after setup.
 EOF
