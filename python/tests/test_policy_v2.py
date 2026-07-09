@@ -53,9 +53,7 @@ def test_render_tactic_rules_and_priorities():
     tactic = to_lean4_string(decisions)
     assert TACTIC_POOL[0] == "ring" and TACTIC_POOL[4] == "linarith"
     assert tactic == (
-        "  aesop\n"
-        "    (add norm 100 (by ring))\n"
-        "    (add unsafe 90% (by linarith))"
+        "  aesop\n    (add norm 100 (by ring))\n    (add unsafe 90% (by linarith))"
     )
 
 
@@ -77,7 +75,9 @@ def test_render_config_skip_default_and_builtin_clause():
 
 
 def test_render_lemma_host_and_ordering():
-    premise = Premise.from_leandojo_format("<a>Nat.add_comm</a> theorem Nat.add_comm ...")
+    premise = Premise.from_leandojo_format(
+        "<a>Nat.add_comm</a> theorem Nat.add_comm ..."
+    )
     decisions = [0] * N_TACTICS
     decisions[0] = 1  # ring → norm 100 (tactic tier sorts before lemma tier)
     lemma = [0] * 32
@@ -109,8 +109,15 @@ def test_render_lemma_none_premise_skipped():
 
 def test_retriever_rejects_wrong_width_cache(tmp_path):
     np.save(tmp_path / "premise_embeddings.npy", np.zeros((3, 7), dtype=np.float32))
-    (tmp_path / "mathlib4_premises.txt").write_text("<a>a</a> x\n<a>b</a> y\n<a>c</a> z\n")
-    r = PremiseRetriever(str(tmp_path), encode_fn=None, hidden_size=1472,
-                         device=torch.device("cpu"), embeddings_on_device=False)
+    (tmp_path / "mathlib4_premises.txt").write_text(
+        "<a>a</a> x\n<a>b</a> y\n<a>c</a> z\n"
+    )
+    r = PremiseRetriever(
+        str(tmp_path),
+        encode_fn=None,
+        hidden_size=1472,
+        device=torch.device("cpu"),
+        embeddings_on_device=False,
+    )
     with pytest.raises(ValueError, match="wrong-encoder"):
         r.load()

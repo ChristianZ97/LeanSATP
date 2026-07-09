@@ -27,7 +27,7 @@ from ..core.premise import premise_name
 SENTENCE_ENCODER = "kaiyuy/leandojo-lean4-retriever-byt5-small"
 MAX_SEQUENCE_LENGTH = 1024
 DROPOUT_RATE = 0.2
-HEAD_DROPOUT_RATE = 0.5          # eval() disables dropout → value irrelevant at inference
+HEAD_DROPOUT_RATE = 0.5  # eval() disables dropout → value irrelevant at inference
 
 # LoRA (must match the trained adapter so base.*.lora_A/lora_B keys load)
 LORA_R = 16
@@ -40,9 +40,9 @@ LEMMA_K = 32
 N_TACTICS = 28
 N_TYPE = 3
 N_PRIORITY = 3
-N_DECISION = 10                  # off + N_TYPE×N_PRIORITY
+N_DECISION = 10  # off + N_TYPE×N_PRIORITY
 N_LEMMA_HOST = 20
-N_LEMMA_DECISION = 181           # off + host×type×priority = 1 + 20·3·3
+N_LEMMA_DECISION = 181  # off + host×type×priority = 1 + 20·3·3
 N_CONFIG_BINARY = 5
 PREMISE_BATCH_SIZE = 16
 
@@ -55,23 +55,65 @@ TYPE_PRIORITY_VALUES = {
 
 # Positional tactic names (decode index i → TACTIC_POOL[i]); asserted == ckpt['tactic_pool']
 TACTIC_POOL = [
-    "ring", "field_simp", "norm_num", "norm_cast", "linarith", "nlinarith",
-    "positivity", "omega", "abel", "push_neg", "zify", "gcongr", "bound",
-    "interval_cases", "ring_nf", "ext", "split", "exfalso", "simp", "simp_all",
-    "ring_nf at *", "field_simp [*] at *", "norm_num [*] at *", "norm_cast at *",
-    "rfl", "decide", "push_cast", "assumption_mod_cast",
+    "ring",
+    "field_simp",
+    "norm_num",
+    "norm_cast",
+    "linarith",
+    "nlinarith",
+    "positivity",
+    "omega",
+    "abel",
+    "push_neg",
+    "zify",
+    "gcongr",
+    "bound",
+    "interval_cases",
+    "ring_nf",
+    "ext",
+    "split",
+    "exfalso",
+    "simp",
+    "simp_all",
+    "ring_nf at *",
+    "field_simp [*] at *",
+    "norm_num [*] at *",
+    "norm_cast at *",
+    "rfl",
+    "decide",
+    "push_cast",
+    "assumption_mod_cast",
 ]
 
 LEMMA_HOST_POOL = [
-    "apply {L}", "rw [{L}]", "rw [{L}] at *", "rw [← {L}]", "rw [← {L}] at *",
-    "simp_rw [{L}]", "simp only [{L}]", "simp only [{L}] at *", "simp [{L}] at *",
-    "simp_all [{L}]", "simp_all only [{L}]", "norm_num [{L}] at *",
-    "field_simp [{L}] at *", "push_cast [{L}] at *", "unfold {L}",
-    "solve_by_elim [{L}]", "grind only [{L}]", "linarith [{L}]", "nlinarith [{L}]",
+    "apply {L}",
+    "rw [{L}]",
+    "rw [{L}] at *",
+    "rw [← {L}]",
+    "rw [← {L}] at *",
+    "simp_rw [{L}]",
+    "simp only [{L}]",
+    "simp only [{L}] at *",
+    "simp [{L}] at *",
+    "simp_all [{L}]",
+    "simp_all only [{L}]",
+    "norm_num [{L}] at *",
+    "field_simp [{L}] at *",
+    "push_cast [{L}] at *",
+    "unfold {L}",
+    "solve_by_elim [{L}]",
+    "grind only [{L}]",
+    "linarith [{L}]",
+    "nlinarith [{L}]",
     "positivity [{L}]",
 ]
 
-CONFIG_LEVEL_KEYS = ("maxRuleApplications", "maxRuleApplicationDepth", "maxNormIterations", "maxGoals")
+CONFIG_LEVEL_KEYS = (
+    "maxRuleApplications",
+    "maxRuleApplicationDepth",
+    "maxNormIterations",
+    "maxGoals",
+)
 CONFIG_LEVEL_VALUES = {
     "maxRuleApplications": [40, 100, 200, 400, 700, 1100, 1600, 2400],
     "maxRuleApplicationDepth": [10, 20, 30, 60, 120, 220, 380, 600],
@@ -84,12 +126,23 @@ CONFIG_LEVEL_DEFAULTS = {
     "maxNormIterations": 100,
     "maxGoals": None,
 }
-CONFIG_LEVEL_CARD = [len(CONFIG_LEVEL_VALUES[k]) for k in CONFIG_LEVEL_KEYS]  # [8,8,8,8]
+CONFIG_LEVEL_CARD = [
+    len(CONFIG_LEVEL_VALUES[k]) for k in CONFIG_LEVEL_KEYS
+]  # [8,8,8,8]
 
-CONFIG_BINARY_KEYS = ("enableSimp", "useSimpAll", "enableUnfold", "useDefaultSimpSet", "enableBuiltin")
+CONFIG_BINARY_KEYS = (
+    "enableSimp",
+    "useSimpAll",
+    "enableUnfold",
+    "useDefaultSimpSet",
+    "enableBuiltin",
+)
 DEFAULT_CONFIG_BINARY = {
-    "enableSimp": True, "useSimpAll": True, "enableUnfold": True,
-    "useDefaultSimpSet": True, "enableBuiltin": True,
+    "enableSimp": True,
+    "useSimpAll": True,
+    "enableUnfold": True,
+    "useDefaultSimpSet": True,
+    "enableBuiltin": True,
 }
 
 
@@ -133,8 +186,10 @@ class LoRALayer(nn.Module):
             param.requires_grad = False
         self.lora_A = nn.Parameter(torch.zeros(r, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, r))
-        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0 else nn.Identity()
-        nn.init.kaiming_uniform_(self.lora_A, a=5 ** 0.5)
+        self.lora_dropout = (
+            nn.Dropout(p=lora_dropout) if lora_dropout > 0 else nn.Identity()
+        )
+        nn.init.kaiming_uniform_(self.lora_A, a=5**0.5)
         nn.init.zeros_(self.lora_B)
         self.disabled = False
 
@@ -177,12 +232,19 @@ def apply_lora_to_model(model: nn.Module, cfg: LoRAConfig):
             if any(excl in full_name for excl in cfg.modules_to_exclude):
                 continue
             is_linear = isinstance(child, nn.Linear) or (
-                hasattr(child, "weight") and hasattr(child, "in_features")
-                and hasattr(child, "out_features") and not list(child.children())
+                hasattr(child, "weight")
+                and hasattr(child, "in_features")
+                and hasattr(child, "out_features")
+                and not list(child.children())
             )
             if is_linear:
                 if _should_apply_lora(name):
-                    lora_layer = LoRALayer(child, r=cfg.r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout)
+                    lora_layer = LoRALayer(
+                        child,
+                        r=cfg.r,
+                        lora_alpha=cfg.lora_alpha,
+                        lora_dropout=cfg.lora_dropout,
+                    )
                     setattr(module, name, lora_layer)
                     adapted_modules.append(full_name)
             else:
@@ -196,7 +258,9 @@ def apply_lora_to_model(model: nn.Module, cfg: LoRAConfig):
 # VENDORED: src/aesop/models/components/heads.py
 # ============================================================================
 class TacticHeads(nn.Module):
-    def __init__(self, hidden_size: int, n_tactics: int = N_TACTICS, dropout_rate: float = 0.0):
+    def __init__(
+        self, hidden_size: int, n_tactics: int = N_TACTICS, dropout_rate: float = 0.0
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.n_tactics = n_tactics
@@ -221,7 +285,9 @@ class LemmaHeads(nn.Module):
         self.dropout_rate = dropout_rate
         self.shared_head = nn.Linear(hidden_size * 2, self.num_decisions)
         self.calibration = nn.Sequential(
-            nn.Linear(1, lemma_k), nn.ReLU(), nn.Linear(lemma_k, self.num_decisions),
+            nn.Linear(1, lemma_k),
+            nn.ReLU(),
+            nn.Linear(lemma_k, self.num_decisions),
         )
         film_d = 32
         self.embed_proj = nn.Linear(hidden_size, film_d)
@@ -234,7 +300,9 @@ class LemmaHeads(nn.Module):
     def forward(self, features, lemma_embeddings=None):
         batch_size = features.shape[0]
         if lemma_embeddings is None:
-            lemma_embeddings = features.new_zeros(batch_size, self.lemma_k, self.hidden_size)
+            lemma_embeddings = features.new_zeros(
+                batch_size, self.lemma_k, self.hidden_size
+            )
         expanded = features.unsqueeze(1).expand(-1, lemma_embeddings.shape[1], -1)
         combined = torch.cat([expanded, lemma_embeddings], dim=-1)
         combined = F.dropout(combined, p=self.dropout_rate, training=self.training)
@@ -256,7 +324,9 @@ class ConfigHeads(nn.Module):
     def __init__(self, hidden_size: int, dropout_rate: float = 0.0):
         super().__init__()
         self.dropout_rate = dropout_rate
-        self.level_heads = nn.ModuleList(nn.Linear(hidden_size, c) for c in CONFIG_LEVEL_CARD)
+        self.level_heads = nn.ModuleList(
+            nn.Linear(hidden_size, c) for c in CONFIG_LEVEL_CARD
+        )
         self.binary_head = nn.Linear(hidden_size, N_CONFIG_BINARY * 2)
 
     def _drop(self, features):
@@ -266,7 +336,9 @@ class ConfigHeads(nn.Module):
         B = features.shape[0]
         return {
             "level": [h(self._drop(features)) for h in self.level_heads],
-            "binary": self.binary_head(self._drop(features)).view(B, N_CONFIG_BINARY, 2),
+            "binary": self.binary_head(self._drop(features)).view(
+                B, N_CONFIG_BINARY, 2
+            ),
         }
 
 
@@ -279,15 +351,20 @@ class PremiseEncoder:
         self.tokenizer = tokenizer
         self.cache_dir = cache_dir
 
-    def encode_premises(self, premises: List[str], batch_size: int = None) -> torch.Tensor:
+    def encode_premises(
+        self, premises: List[str], batch_size: int = None
+    ) -> torch.Tensor:
         if batch_size is None:
             batch_size = PREMISE_BATCH_SIZE
         all_embeddings = []
         for i in range(0, len(premises), batch_size):
-            batch_premises = premises[i:i + batch_size]
+            batch_premises = premises[i : i + batch_size]
             inputs = self.tokenizer(
-                batch_premises, return_tensors="pt", padding=True,
-                truncation=True, max_length=MAX_SEQUENCE_LENGTH,
+                batch_premises,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=MAX_SEQUENCE_LENGTH,
             )
             inputs = {k: v.to(self.base_model.device) for k, v in inputs.items()}
             with torch.no_grad():
@@ -325,7 +402,9 @@ def _minmax_normalize_rows(scores: torch.Tensor) -> torch.Tensor:
 
 
 class PremiseRetriever:
-    def __init__(self, cache_dir, encode_fn, hidden_size, device, embeddings_on_device=True):
+    def __init__(
+        self, cache_dir, encode_fn, hidden_size, device, embeddings_on_device=True
+    ):
         self.cache_dir = cache_dir
         self.encode_fn = encode_fn
         self.hidden_size = hidden_size
@@ -344,7 +423,9 @@ class PremiseRetriever:
         txt_path = os.path.join(self.cache_dir, "mathlib4_premises.txt")
         missing = [p for p in (emb_path, txt_path) if not os.path.exists(p)]
         if missing:
-            raise FileNotFoundError("missing v2 retrieval assets: " + ", ".join(missing))
+            raise FileNotFoundError(
+                "missing v2 retrieval assets: " + ", ".join(missing)
+            )
         embeddings = torch.from_numpy(np.load(emb_path)).float()
         if embeddings.ndim != 2 or embeddings.shape[1] != self.hidden_size:
             raise ValueError(
@@ -353,7 +434,9 @@ class PremiseRetriever:
         if self._embeddings_on_device:
             embeddings = embeddings.to(self.device)
         with open(txt_path, encoding="utf-8") as f:
-            self._premises = [Premise.from_leandojo_format(ln.strip()) for ln in f if ln.strip()]
+            self._premises = [
+                Premise.from_leandojo_format(ln.strip()) for ln in f if ln.strip()
+            ]
         if len(self._premises) != embeddings.shape[0]:
             raise ValueError(
                 f"premise/embedding count mismatch: {len(self._premises)} names vs "
@@ -372,7 +455,9 @@ class PremiseRetriever:
         return self._dense_topk(similarities, k, normalize_scores)
 
     def retrieve(self, query, k=None, normalize_scores=True):
-        prems_batch, scores_batch, embs_batch = self.retrieve_batch([query], k=k, normalize_scores=normalize_scores)
+        prems_batch, scores_batch, embs_batch = self.retrieve_batch(
+            [query], k=k, normalize_scores=normalize_scores
+        )
         return prems_batch[0], scores_batch[0], embs_batch[0]
 
     def _dense_topk(self, similarities, k, normalize_scores):
@@ -380,14 +465,18 @@ class PremiseRetriever:
         n_docs = similarities.shape[1]
         actual_k = min(k, n_docs)
         top_scores, top_indices = torch.topk(similarities, actual_k, dim=1)
-        top_embeddings = self._cached_embs[top_indices.view(-1)].view(batch_size, actual_k, -1)
+        top_embeddings = self._cached_embs[top_indices.view(-1)].view(
+            batch_size, actual_k, -1
+        )
         premises_batch = []
         for b in range(batch_size):
             row = [self._premises[i] for i in top_indices[b].tolist()]
             if actual_k < k:
                 row.extend([None] * (k - actual_k))
             premises_batch.append(row)
-        top_scores, top_embeddings = self._pad_scores_embs(top_scores, top_embeddings, k, actual_k, batch_size)
+        top_scores, top_embeddings = self._pad_scores_embs(
+            top_scores, top_embeddings, k, actual_k, batch_size
+        )
         if normalize_scores:
             top_scores = _minmax_normalize_rows(top_scores)
         return premises_batch, top_scores, top_embeddings
@@ -398,11 +487,15 @@ class PremiseRetriever:
         pad = k - actual_k
         pad_scores = torch.zeros(batch_size, pad, device=scores.device)
         pad_embs = torch.zeros(batch_size, pad, embs.shape[-1], device=embs.device)
-        return torch.cat([scores, pad_scores], dim=1), torch.cat([embs, pad_embs], dim=1)
+        return torch.cat([scores, pad_scores], dim=1), torch.cat(
+            [embs, pad_embs], dim=1
+        )
 
     def _require_cache(self) -> None:
         if not self.ready:
-            raise ValueError("Premise cache not loaded. Need cache/premise_embeddings.npy + cache/mathlib4_premises.txt.")
+            raise ValueError(
+                "Premise cache not loaded. Need cache/premise_embeddings.npy + cache/mathlib4_premises.txt."
+            )
 
 
 # ============================================================================
@@ -416,7 +509,9 @@ class AesopPolicyV2(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.cache_dir = os.path.abspath(cache_dir or "./cache")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(SENTENCE_ENCODER, cache_dir=cache_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            SENTENCE_ENCODER, cache_dir=cache_dir
+        )
         self.tokenizer.padding_side = "right"
         self.base = AutoModelForTextEncoding.from_pretrained(
             SENTENCE_ENCODER, cache_dir=cache_dir, dtype=torch.float32
@@ -447,9 +542,15 @@ class AesopPolicyV2(nn.Module):
             nn.Linear(self.expanded_size, self.hidden_size),
         )
 
-        self.tactic_heads = TacticHeads(self.hidden_size, dropout_rate=HEAD_DROPOUT_RATE)
-        self.lemma_heads = LemmaHeads(self.hidden_size, LEMMA_K, dropout_rate=HEAD_DROPOUT_RATE)
-        self.config_heads = ConfigHeads(self.hidden_size, dropout_rate=HEAD_DROPOUT_RATE)
+        self.tactic_heads = TacticHeads(
+            self.hidden_size, dropout_rate=HEAD_DROPOUT_RATE
+        )
+        self.lemma_heads = LemmaHeads(
+            self.hidden_size, LEMMA_K, dropout_rate=HEAD_DROPOUT_RATE
+        )
+        self.config_heads = ConfigHeads(
+            self.hidden_size, dropout_rate=HEAD_DROPOUT_RATE
+        )
         self.premise_encoder = PremiseEncoder(self.base, self.tokenizer, cache_dir)
 
         self.to(self.device)
@@ -467,7 +568,14 @@ class AesopPolicyV2(nn.Module):
         lens = mask.sum(dim=1).clamp(min=1)
         return F.normalize(summed / lens, dim=1)
 
-    def forward(self, input_ids, attention_mask, lemma_scores=None, lemma_embeddings=None, **kwargs):
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        lemma_scores=None,
+        lemma_embeddings=None,
+        **kwargs,
+    ):
         base_outputs = self.base(input_ids=input_ids, attention_mask=attention_mask)
         pooled = self._mean_pool(base_outputs.last_hidden_state, attention_mask)
         shared_features = self.shared_mlp(pooled)
@@ -475,7 +583,9 @@ class AesopPolicyV2(nn.Module):
         lemma_features = None
         if lemma_embeddings is not None:
             B, K, D = lemma_embeddings.shape
-            lemma_features = self.shared_mlp(lemma_embeddings.reshape(B * K, D)).reshape(B, K, D)
+            lemma_features = self.shared_mlp(
+                lemma_embeddings.reshape(B * K, D)
+            ).reshape(B, K, D)
 
         tactic_logits = self.tactic_heads(shared_features)
         lemma_logits = self.lemma_heads(shared_features, lemma_features)
@@ -483,7 +593,9 @@ class AesopPolicyV2(nn.Module):
 
         residual_logits = None
         if lemma_scores is not None:
-            residual_logits = self.lemma_heads.compute_residual(lemma_scores, lemma_features)
+            residual_logits = self.lemma_heads.compute_residual(
+                lemma_scores, lemma_features
+            )
 
         return {
             "tactic_logits": tactic_logits,
@@ -542,9 +654,14 @@ def _rule_line(type_name: str, pval: int, body: str) -> str:
     return f"    (add {type_name} {pval} {inner})"
 
 
-def to_lean4_string(tactic_decisions, lemma_decisions=None, lemma_premises=None,
-                    config_level=None, config_binary=None,
-                    tactic_name: str = "aesop") -> str:
+def to_lean4_string(
+    tactic_decisions,
+    lemma_decisions=None,
+    lemma_premises=None,
+    config_level=None,
+    config_binary=None,
+    tactic_name: str = "aesop",
+) -> str:
     if not tactic_name or not tactic_name.strip():
         raise ValueError("tactic_name must be a non-empty string")
     tactic_name = tactic_name.strip()
@@ -592,7 +709,9 @@ def to_lean4_string(tactic_decisions, lemma_decisions=None, lemma_premises=None,
             continue
         type_name, p = dec
         pval = TYPE_PRIORITY_VALUES[type_name][p]
-        entries.append((type_order[type_name], i, _rule_line(type_name, pval, TACTIC_POOL[i])))
+        entries.append(
+            (type_order[type_name], i, _rule_line(type_name, pval, TACTIC_POOL[i]))
+        )
 
     if lemma_decisions and lemma_premises:
         for j, v in enumerate(lemma_decisions):
@@ -605,7 +724,9 @@ def to_lean4_string(tactic_decisions, lemma_decisions=None, lemma_premises=None,
             host_idx, type_name, p = dec
             pval = TYPE_PRIORITY_VALUES[type_name][p]
             body = LEMMA_HOST_POOL[host_idx].format(L=name)
-            entries.append((3 + type_order[type_name], j, _rule_line(type_name, pval, body)))
+            entries.append(
+                (3 + type_order[type_name], j, _rule_line(type_name, pval, body))
+            )
 
     if not entries:
         return head
@@ -642,7 +763,9 @@ def build_policy_v2(ckpt: dict, cache_dir: str, device: str) -> AesopPolicyV2:
 
     model = AesopPolicyV2(device=device, cache_dir=cache_dir)
     missing, unexpected = model.load_state_dict(sd, strict=False)
-    real_missing = [k for k in missing if not k.startswith(("premise_encoder.", "_retriever."))]
+    real_missing = [
+        k for k in missing if not k.startswith(("premise_encoder.", "_retriever."))
+    ]
     if real_missing or unexpected:
         raise RuntimeError(
             "v2 checkpoint architecture mismatch: "
@@ -669,19 +792,29 @@ def policy_tactic_v2(
     # top-k (and its ByT5 query encode) instead of paying it inside the lock
     skip_retrieval = strip_retrieval or os.environ.get("SATP_ABLATE_RETRIEVAL") == "1"
     if retrieval_enabled and not skip_retrieval and model.has_premise_cache():
-        top_k_premises, lemma_scores, lemma_embs = model.retrieve(formal_statement, k=LEMMA_K)
+        top_k_premises, lemma_scores, lemma_embs = model.retrieve(
+            formal_statement, k=LEMMA_K
+        )
 
     inputs = model.tokenizer(
-        [formal_statement], return_tensors="pt", padding=True,
-        truncation=True, max_length=MAX_SEQUENCE_LENGTH,
+        [formal_statement],
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=MAX_SEQUENCE_LENGTH,
     )
     input_ids = inputs["input_ids"].to(device)
     attention_mask = inputs["attention_mask"].to(device)
     with torch.no_grad():
         out = model(
-            input_ids, attention_mask,
-            lemma_scores=lemma_scores.unsqueeze(0).to(device) if lemma_scores is not None else None,
-            lemma_embeddings=lemma_embs.unsqueeze(0).to(device) if lemma_embs is not None else None,
+            input_ids,
+            attention_mask,
+            lemma_scores=lemma_scores.unsqueeze(0).to(device)
+            if lemma_scores is not None
+            else None,
+            lemma_embeddings=lemma_embs.unsqueeze(0).to(device)
+            if lemma_embs is not None
+            else None,
         )
 
     tactic = out["tactic_logits"][0].argmax(dim=-1).tolist()
@@ -699,4 +832,6 @@ def policy_tactic_v2(
     if os.environ.get("SATP_ABLATE_BUDGET") == "1":
         level = None
 
-    return to_lean4_string(tactic, lemma, top_k_premises, level, binary, tactic_name=tactic_name)
+    return to_lean4_string(
+        tactic, lemma, top_k_premises, level, binary, tactic_name=tactic_name
+    )
