@@ -128,8 +128,17 @@ cd "$ROOT"
 uv sync
 mkdir -p .lake/packages/proofwidgets/.lake/build/lib   # mathlib post-update hook prune-safety
 lake update mathlib
-LD_LIBRARY_PATH="$CT2LIB:${LD_LIBRARY_PATH:-}" lake build LeanSATP LeanSATP.Bridge LeanSATP.BFS LeanSATP.RulesetInit
+# Build the FULL Mathlib closure too — NOT just the subset `import LeanSATP`
+# pulls. Standalone `import Mathlib` must resolve so the satp policy's emitted
+# Mathlib tactics (ring / nlinarith / omega / field_simp / …) elaborate; without
+# this the transitive deps (Qq / ProofWidgets / plausible / …) stay unbuilt under
+# .lake/packages and `import Mathlib` dies with "unknown module prefix 'Qq'".
+# Mathlib is a path-dep to the already-built deps/mathlib4, so this only fills in
+# those small missing deps — it reuses deps/mathlib4's oleans, no Mathlib rebuild.
+LD_LIBRARY_PATH="$CT2LIB:${LD_LIBRARY_PATH:-}" lake build Mathlib LeanSATP LeanSATP.Bridge LeanSATP.BFS LeanSATP.RulesetInit
 [ -f "$ROOT/.lake/build/lib/lean/LeanSATP/BFS.olean" ] || die "LeanSATP.BFS did not build"
+[ -n "$(find .lake/packages/Qq/.lake/build/lib -name 'Qq.olean' 2>/dev/null)" ] \
+  || die "Mathlib closure incomplete (Qq unbuilt) — standalone 'import Mathlib' would fail"
 
 # --- 5. SATP v2 policy checkpoint ------------------------------------------
 log "5. SATP v2 checkpoint  ($SATP_CACHE_DIR/best_checkpoint.pt)"
