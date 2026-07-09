@@ -152,8 +152,3 @@ elif [ "$FORCE" = 1 ] || [ ! -f "$SATP_CACHE_DIR/best_checkpoint.pt" ]; then
 else echo "  already present — skip"; fi
 
 log "STANDALONE v4.26 ENV READY — satp + bfsaesop build on v4.26"
-cat <<EOF
-
-  CTranslate2 load/link paths are embedded in the generated Lake environment.
-  No SATP_LEANCOPILOT_LIB_DIR or LD_LIBRARY_PATH export is required after setup.
-EOF
