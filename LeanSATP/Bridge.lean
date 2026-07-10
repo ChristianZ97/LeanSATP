@@ -1,6 +1,5 @@
 import Aesop
 import Lean
-import Mathlib.Tactic.ClearExcept
 
 open Lean Parser Elab Tactic Meta
 open System (FilePath)
@@ -149,36 +148,18 @@ private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "
   | .error err => .error err
 
 /--
-Iterate the filtered local context used by both input renderers. Keeps
-non-anonymous, non-implementation, non-inst-implicit, non-`let` hypotheses
-and zeta-reduces their types so Python reconstruction doesn't trip on
-let-bindings (e.g. `let b := n / 6` turning into an `optParam` binder).
--/
-private def collectFilteredHyps : TacticM (Array (Lean.Name × Lean.Format)) :=
-  withMainContext do
-    let mut acc : Array (Lean.Name × Lean.Format) := #[]
-    for decl in ← getLCtx do
-      if decl.userName.isAnonymous
-          || decl.isImplementationDetail
-          || decl.binderInfo.isInstImplicit
-          || decl.isLet then
-        continue
-      let renderedType ← ppExpr (← zetaReduce decl.type)
-      acc := acc.push (decl.userName, renderedType)
-    return acc
-
-/--
-Render the current tactic state as a raw goal state (Lean's `⊢` format),
-matching the pretrain distribution and the input modality used by
-BFS-Prover / ReProver / LeanCopilot. One hypothesis per line, goal
-prefixed with `⊢`.
+Render the current tactic state with Lean's standard goal printer
+(`Meta.ppGoal`) — the same rendering that produced satp-policy-v2's
+training / eval `goal_state` inputs (same-type binders merged into one
+line: `b h v : ℝ`). The byt5 policy is byte-sensitive, so any rendering
+drift shifts decodes: the previous hand-rolled one-hypothesis-per-line
+renderer perturbed the policy input on essentially every problem.
+2026-07-10 probe: under `ppGoal`, 182/208 parseable minif2f-test
+statements render byte-equal to the dataset `goal_state`; the remaining
+26 are stale-era pretty-print artifacts no current printer reproduces.
 -/
 private def collectGoalState : TacticM String := withMainContext do
-  let hyps ← collectFilteredHyps
-  let hypLines := hyps.map fun (n, t) => s!"{n} : {t.pretty}"
-  let renderedGoal ← ppExpr (← zetaReduce (← getMainTarget))
-  let lines := hypLines ++ #[s!"⊢ {renderedGoal.pretty}"]
-  return "\n".intercalate lines.toList
+  return (← ppGoal (← getMainGoal)).pretty
 
 /--
 satp-policy-v2 is trained and reproduced with goal-state policy inputs.

@@ -32,6 +32,13 @@ example (n : Nat) (hn : n > 0) : n * 2 ≥ 2 := by
   have h1 : n ≥ 1 := by satp
   linarith
 
+-- Mid-proof `satp?` (no aesop fallback): the policy itself must close a
+-- `have` goal rendered via the standard printer — catches policy-input
+-- regressions that bare `satp`'s fallback would mask.
+example (n : Nat) (hn : n > 0) : n * 2 ≥ 2 := by
+  have h1 : n ≥ 1 := by satp?
+  linarith
+
 -- Chained `have`s all become binders of the next satp invocation.
 example (n : Nat) (hn : n > 0) : n * 2 > 1 := by
   have h1 : n ≥ 1 := hn
