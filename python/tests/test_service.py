@@ -397,9 +397,7 @@ class SATPServerLifecycleTests(unittest.TestCase):
         self.assertIn("INFO     Try me with:", output)
         self.assertIn("curl --request POST \\", output)
         self.assertIn("--url http://localhost:5177/infer \\", output)
-        self.assertIn(
-            '--data \'{"formal_statement":"⊢ True"}\' | jq', output
-        )
+        self.assertIn('--data \'{"formal_statement":"⊢ True"}\' | jq', output)
         self.assertNotIn("tactic_name", output)
         self.assertIn("INFO     Shutting down", output)
         self.assertIn("INFO     Waiting for application shutdown.", output)
