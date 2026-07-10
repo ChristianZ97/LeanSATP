@@ -1,0 +1,92 @@
+{"dataset_index": 0, "uuid": "8d41317fddb9a572", "name": "mathd_algebra_478", "minimal_tactics": ["(nlinarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 4, "uuid": "e33345baef64988a", "name": "mathd_algebra_141", "minimal_tactics": ["(nlinarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 8, "uuid": "382d34dcc2e8306b", "name": "mathd_numbertheory_1124", "minimal_tactics": ["simp_all only [Nat.reduceMul]", "(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 11, "uuid": "70bd9b80ec622d76", "name": "mathd_algebra_33", "minimal_tactics": ["(grind only [div_eq_iff_mul_eq])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 12, "uuid": "e885358c1a3b6cad", "name": "amc12b_2021_p3", "minimal_tactics": ["simp_all only [one_div]", "(grind only [one_div])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 13, "uuid": "988e7e3848492d5b", "name": "mathd_numbertheory_299", "minimal_tactics": ["simp_all only [one_mul, Nat.reduceMul, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 14, "uuid": "90e42913ac95f1a7", "name": "amc12b_2020_p2", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 17, "uuid": "5d9d887dfa8cfdd5", "name": "mathd_algebra_419", "minimal_tactics": ["simp_all only [neg_neg, neg_mul, one_mul, mul_neg]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 23, "uuid": "b700ce4df72c2f6c", "name": "mathd_algebra_398", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 25, "uuid": "98436ce9d2c6936e", "name": "mathd_numbertheory_430", "minimal_tactics": ["subst h\u2086", "(grind only [Nat.add_sub_of_le])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 32, "uuid": "8ec843dd3be5c237", "name": "mathd_numbertheory_559", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 33, "uuid": "2ebac9bd104d5f63", "name": "mathd_algebra_160", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 34, "uuid": "5a5953aefcacf518", "name": "mathd_algebra_24", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 35, "uuid": "d96feee276a0adef", "name": "mathd_algebra_176", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 37, "uuid": "a4044b33aa6cf7a0", "name": "mathd_algebra_208", "minimal_tactics": ["simp_all only [one_div]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 41, "uuid": "57d619777f5bcd84", "name": "mathd_numbertheory_12", "minimal_tactics": ["(bound )"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 42, "uuid": "f8f52759c66ff43d", "name": "mathd_numbertheory_345", "minimal_tactics": ["simp_all only [Nat.reduceAdd, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 44, "uuid": "6f208288f6be51ea", "name": "mathd_numbertheory_328", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 49, "uuid": "75f606c1db9c2f13", "name": "mathd_algebra_171", "minimal_tactics": ["simp_all only [mul_one]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 51, "uuid": "2b021e9ea37b249d", "name": "mathd_algebra_188", "minimal_tactics": ["simp_all only [Equiv.toFun_as_coe, Equiv.invFun_as_coe, Equiv.apply_symm_apply]"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 52, "uuid": "befacb06970d4cf2", "name": "mathd_numbertheory_765", "minimal_tactics": ["(bound )", "(ring_nf at *)", "(grind only [Int.emod_nonneg])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 54, "uuid": "acaf45f70e4d6944", "name": "mathd_numbertheory_175", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 60, "uuid": "8b53f2b3cd79283b", "name": "mathd_algebra_346", "minimal_tactics": ["simp_all only [sub_add_cancel]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 61, "uuid": "1c5d5731864e1d55", "name": "mathd_algebra_487", "minimal_tactics": ["simp_all only", "(simp_all)", "(grind only [Real.sqrt_mul])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 62, "uuid": "9a27f0fbbb4f42c1", "name": "mathd_numbertheory_728", "minimal_tactics": ["simp_all only [Nat.reducePow, Nat.reduceSub, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 69, "uuid": "57d05527849f8048", "name": "mathd_numbertheory_293", "minimal_tactics": ["simp_all only [Nat.reduceMul]", "(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 70, "uuid": "5ccc1828f3babebe", "name": "mathd_numbertheory_769", "minimal_tactics": ["simp_all only [Nat.reducePow, Nat.reduceAdd, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 71, "uuid": "ce4eda092c10bff6", "name": "mathd_algebra_452", "minimal_tactics": ["(grind only [one_div])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 73, "uuid": "90340d297f3f1b43", "name": "mathd_numbertheory_207", "minimal_tactics": ["simp_all only [Nat.reducePow, Nat.reduceMul, Nat.reduceAdd]"], "axioms": ["propext"]}
+{"dataset_index": 74, "uuid": "cab9f44f079da3e8", "name": "mathd_numbertheory_342", "minimal_tactics": ["simp_all only [Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 75, "uuid": "ec6c5a7744777550", "name": "mathd_numbertheory_483", "minimal_tactics": ["simp_all only [zero_add, Nat.add_eq_left, Nat.reduceAdd, add_zero, Nat.reduceMod]"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 77, "uuid": "76c550733171ea8d", "name": "amc12a_2003_p5", "minimal_tactics": ["(grind only [Nat.ofDigits_cons])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 79, "uuid": "02cd3e6ba1811771", "name": "mathd_algebra_296", "minimal_tactics": ["simp only [Int.reduceSub, Int.reduceAdd, Int.reduceMul, Int.reducePow, abs_neg, Nat.abs_ofNat] at *"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 81, "uuid": "8006f66f0bf38123", "name": "algebra_2varlineareq_fp3zeq11_3tfm1m5zeqn68_feqn10_zeq7", "minimal_tactics": ["(grind only [Complex.two_pi_I_ne_zero])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 82, "uuid": "54b83ee5ec54925d", "name": "mathd_numbertheory_247", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 84, "uuid": "7e393abb285b4106", "name": "mathd_algebra_107", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 86, "uuid": "b6799b2254bdeef1", "name": "mathd_algebra_412", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 87, "uuid": "d868c620b6cedb3b", "name": "amc12a_2013_p4", "minimal_tactics": ["(grind only [div_div])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 89, "uuid": "ebf4fa7e56e39fd1", "name": "mathd_numbertheory_314", "minimal_tactics": ["subst h\u2080", "simp_all only [Nat.reduceMod]", "(grind only [Nat.mod_lt])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 93, "uuid": "75422c4719fb6437", "name": "amc12b_2002_p7", "minimal_tactics": ["simp_all only [lt_add_iff_pos_left, add_pos_iff, zero_lt_one, or_true, Nat.ofNat_pos, and_self, and_true]", "(nlinarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 94, "uuid": "561339b8bb4c68cf", "name": "mathd_algebra_80", "minimal_tactics": ["simp_all only [ne_eq]", "(grind only [div_eq_one])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 97, "uuid": "cb5ed425c8001707", "name": "mathd_numbertheory_135", "minimal_tactics": ["subst h\u2080", "simp_all only [ne_eq, List.pairwise_cons, List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq, IsEmpty.forall_iff, implies_true, List.Pairwise.nil, and_self, and_true, Nat.reducePow, Nat.reduceAdd, Nat.reduceDvd, Nat.reduceLeDiff, Nat.ofNat_pos, Nat.digits_of_two_le_of_pos, Nat.reduceMod, Nat.reduceDiv, zero_lt_one, Nat.one_mod, Nat.digits_zero, List.cons.injEq, and_self_left]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 98, "uuid": "8213018d746ae53f", "name": "mathd_algebra_275", "minimal_tactics": ["simp_all only [Nat.reduceDiv, pow_zero, Real.one_rpow, one_div, one_eq_inv, OfNat.ofNat_ne_one]"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 99, "uuid": "bc73e32d35292197", "name": "mathd_algebra_388", "minimal_tactics": ["simp_all only [neg_mul]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 102, "uuid": "9f1ddfaa3da4b3be", "name": "mathd_algebra_263", "minimal_tactics": ["(grind only [Real.mul_self_sqrt])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 103, "uuid": "8454adcdf8c8b393", "name": "mathd_numbertheory_34", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 108, "uuid": "4ec363b4ec392354", "name": "mathd_algebra_432", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 119, "uuid": "193c1698fbb3f6f9", "name": "mathd_algebra_427", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 120, "uuid": "8d6c386149b8ef56", "name": "mathd_algebra_76", "minimal_tactics": ["(grind only [even_iff_two_dvd])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 121, "uuid": "7e0112a42d02e908", "name": "mathd_numbertheory_99", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 123, "uuid": "04a2f5a673552dab", "name": "mathd_numbertheory_233", "minimal_tactics": ["simp_all only [Nat.reducePow]", "(bound )"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 127, "uuid": "ff8de9a5d3d66295", "name": "mathd_numbertheory_321", "minimal_tactics": ["simp_all only", "(bound )"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 129, "uuid": "5af3687a82e029da", "name": "mathd_algebra_153", "minimal_tactics": ["subst h\u2080", "simp_all only [one_div]", "(bound )"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 132, "uuid": "14247e3b1dab88f0", "name": "mathd_algebra_329", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 137, "uuid": "b3b550520437a8df", "name": "mathd_numbertheory_229", "minimal_tactics": ["simp_all only [Nat.reducePow, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 143, "uuid": "cd6372a364acf59c", "name": "mathd_algebra_129", "minimal_tactics": ["simp_all only [ne_eq, div_inv_eq_mul]", "(grind only [div_eq_one])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 146, "uuid": "f4e57e7480c5c06e", "name": "mathd_numbertheory_551", "minimal_tactics": ["simp_all only [Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 147, "uuid": "46fc9d553dc69ff6", "name": "mathd_algebra_304", "minimal_tactics": ["simp_all only [Nat.reducePow]"], "axioms": ["propext"]}
+{"dataset_index": 150, "uuid": "4144bc68b03b184c", "name": "amc12b_2002_p19", "minimal_tactics": ["(nlinarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 151, "uuid": "371fcb2b4e7ef847", "name": "mathd_numbertheory_341", "minimal_tactics": ["simp_all only [Nat.reducePow, Nat.reduceMod, Nat.reduceLeDiff, Nat.ofNat_pos, Nat.digits_of_two_le_of_pos, Nat.reduceDiv, Nat.digits_zero, List.cons.injEq, and_true]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 159, "uuid": "9a3ff5f85ab64e2f", "name": "mathd_numbertheory_212", "minimal_tactics": ["simp_all only [Nat.reducePow, Nat.reduceMul, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 160, "uuid": "fc62d8e1ee7d7e5a", "name": "mathd_numbertheory_320", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 161, "uuid": "9e4abbea2094f6dc", "name": "mathd_algebra_125", "minimal_tactics": ["subst h\u2081", "simp_all only [Nat.ofNat_pos, mul_pos_iff_of_pos_left, and_self, Nat.cast_mul, Nat.cast_ofNat]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 163, "uuid": "b0ae24569690733d", "name": "mathd_algebra_148", "minimal_tactics": ["simp_all only", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 172, "uuid": "155c2a08f109e87b", "name": "mathd_algebra_440", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 173, "uuid": "6795441941574478", "name": "mathd_numbertheory_254", "minimal_tactics": ["simp_all only [Nat.reduceAdd, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 176, "uuid": "5fcbb59544784209", "name": "mathd_algebra_114", "minimal_tactics": ["simp_all only [one_div]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 178, "uuid": "0aa6cde4872a3ad5", "name": "mathd_algebra_513", "minimal_tactics": ["(bound )"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 179, "uuid": "7a9743d2e550a574", "name": "mathd_algebra_143", "minimal_tactics": ["simp_all only", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 180, "uuid": "93c771d36b4191be", "name": "mathd_algebra_354", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 182, "uuid": "3f2052a74ca8900c", "name": "mathd_algebra_246", "minimal_tactics": ["simp_all only [even_two, Even.neg_pow]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 185, "uuid": "95212f29ca7c3706", "name": "mathd_numbertheory_85", "minimal_tactics": ["simp_all only [Nat.reducePow, one_mul, Nat.reduceMul, Nat.reduceAdd]"], "axioms": ["propext"]}
+{"dataset_index": 188, "uuid": "ea15e8b94313f140", "name": "amc12b_2002_p2", "minimal_tactics": ["subst h\u2080", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 191, "uuid": "6e6e891025318202", "name": "mathd_numbertheory_517", "minimal_tactics": ["simp_all only [Nat.reduceMul, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 193, "uuid": "7b6dff5d4c9e8835", "name": "mathd_algebra_270", "minimal_tactics": ["simp_all only [ne_eq, one_div]", "(grind only [one_div])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 200, "uuid": "826557cc55d84b40", "name": "amc12a_2021_p3", "minimal_tactics": ["subst h\u2082", "simp_all only [Int.natCast_ediv, Nat.cast_ofNat]", "(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 203, "uuid": "271620d7b9b036e8", "name": "mathd_numbertheory_66", "minimal_tactics": ["simp_all only [Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 207, "uuid": "64221e0f1956c42d", "name": "aime_1990_p15", "minimal_tactics": ["(grind only [mul_self_nonneg])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 208, "uuid": "35549bb821989d23", "name": "mathd_numbertheory_235", "minimal_tactics": ["simp_all only [Nat.reduceMul, Nat.reduceAdd, Nat.reduceMod]"], "axioms": ["propext"]}
+{"dataset_index": 215, "uuid": "557081752515002a", "name": "mathd_algebra_359", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 224, "uuid": "500a2e50944b5201", "name": "aime_1990_p4", "minimal_tactics": ["simp_all only [ne_eq, one_div]", "(bound )", "(field_simp [*] at *)", "simp_all only [one_div]", "(bound )", "simp_all only", "(field_simp [*] at *)", "simp_all only [zero_mul]", "(nlinarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 226, "uuid": "7313a930ec0f7e78", "name": "mathd_algebra_314", "minimal_tactics": ["simp_all only [Nat.reduceDiv, Nat.reduceAdd, ne_eq, OfNat.ofNat_ne_zero, not_false_eq_true, zero_pow, Nat.reduceMul, Nat.reducePow, zero_mul]"], "axioms": ["propext"]}
+{"dataset_index": 227, "uuid": "3acb623e04d63f1a", "name": "amc12_2000_p20", "minimal_tactics": ["(grind only [mul_div_assoc])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 228, "uuid": "262eeecef42953d8", "name": "mathd_algebra_302", "minimal_tactics": ["simp_all only [one_div]", "(ring)", "simp_all only [Complex.I_sq, one_div, neg_mul, one_mul]", "(bound )"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 230, "uuid": "98a3eac9888760e6", "name": "mathd_algebra_139", "minimal_tactics": ["simp_all only [ne_eq, one_div, OfNat.ofNat_ne_zero, not_false_eq_true]", "(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 234, "uuid": "b180268fcfe33216", "name": "aime_1989_p8", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 236, "uuid": "a8af53e2bb5ba548", "name": "mathd_algebra_142", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 238, "uuid": "64bf83077b7945a0", "name": "mathd_algebra_400", "minimal_tactics": ["(linarith)"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 240, "uuid": "6369998c15631e55", "name": "mathd_numbertheory_185", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 241, "uuid": "5ffdb014a0a85845", "name": "mathd_algebra_441", "minimal_tactics": ["(grind only [Complex.cpow_add])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}
+{"dataset_index": 242, "uuid": "d2d431b5fafa6189", "name": "mathd_numbertheory_582", "minimal_tactics": ["(omega)"], "axioms": ["Quot.sound", "propext"]}
+{"dataset_index": 243, "uuid": "00b5f4ed3e2be60f", "name": "mathd_algebra_338", "minimal_tactics": ["(grind only [mul_inv])"], "axioms": ["Classical.choice", "Quot.sound", "propext"]}

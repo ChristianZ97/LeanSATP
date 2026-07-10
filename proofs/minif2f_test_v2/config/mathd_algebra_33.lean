@@ -1,0 +1,72 @@
+import Mathlib
+
+theorem mathd_algebra_33 (x y z : ℝ) (h₀ : x ≠ 0) (h₁ : 2 * x = 5 * y) (h₂ : 7 * y = 10 * z) :
+    z / x = 7 / 25 := by
+
+  aesop (config := {
+    maxRuleApplications := 1600
+    maxRuleApplicationDepth := 10
+    maxNormIterations := 60
+    maxGoals := 32
+    enableSimp := false
+    enableUnfold := false
+    useDefaultSimpSet := false
+  }) (rule_sets := [-builtin])
+    (add norm 100 (by ring))
+    (add norm 100 (by field_simp))
+    (add norm 100 (by norm_num))
+    (add norm 0 (by linarith))
+    (add norm 0 (by nlinarith))
+    (add norm 0 (by omega))
+    (add norm 100 (by abel))
+    (add norm 100 (by push_neg))
+    (add norm 100 (by zify))
+    (add norm 0 (by bound))
+    (add norm 100 (by interval_cases))
+    (add norm 100 (by ext))
+    (add norm 100 (by split))
+    (add norm 100 (by exfalso))
+    (add norm 100 (by simp))
+    (add norm 100 (by ring_nf at *))
+    (add norm 1 (by field_simp [*] at *))
+    (add norm 100 (by norm_num [*] at *))
+    (add norm 100 (by norm_cast at *))
+    (add norm 0 (by rfl))
+    (add norm 100 (by decide))
+    (add norm 100 (by push_cast))
+    (add norm 100 (by assumption_mod_cast))
+    (add safe 100 (by norm_cast))
+    (add safe 0 (by ring_nf))
+    (add unsafe 90% (by simp_all))
+    (add norm 100 (by apply mul_div_cancel₀))
+    (add norm 100 (by apply div_mul_cancel₀))
+    (add norm 100 (by apply div_self))
+    (add norm 100 (by apply mul_div_cancel_right₀))
+    (add norm 100 (by apply mul_div_cancel_left₀))
+    (add norm 100 (by apply mul_div_mul_left))
+    (add norm 100 (by apply div_eq_one_iff_eq))
+    (add norm 100 (by apply mul_div_mul_right))
+    (add norm 100 (by simp only [eq_div_iff_mul_eq] at *))
+    (add norm 0 (by grind only [div_eq_iff_mul_eq]))
+    (add norm 100 (by apply mul_one_div))
+    (add norm 100 (by apply div_left_inj'))
+    (add norm 100 (by apply sub_div))
+    (add norm 100 (by apply div_pow))
+    (add norm 100 (by apply Complex.log_ofReal_mul))
+    (add norm 0 (by grind only [div_eq_div_iff]))
+    (add unsafe 10% (by push_cast [div_eq_iff] at *))
+    (add unsafe 10% (by linarith [mul_div_assoc]))
+    (add unsafe 10% (by push_cast [eq_div_iff] at *))
+    (add unsafe 10% (by linarith [mul_div]))
+    (add unsafe 10% (by linarith [two_ne_zero']))
+    (add unsafe 10% (by linarith [div_div]))
+    (add unsafe 10% (by linarith [add_div]))
+    (add unsafe 10% (by linarith [div_le_iff']))
+    (add unsafe 10% (by linarith [le_div_iff]))
+    (add unsafe 10% (by linarith [div_le_iff]))
+    (add unsafe 10% (by linarith [mul_div_right_comm]))
+    (add unsafe 10% (by linarith [Real.log_div]))
+    (add unsafe 10% (by linarith [div_mul_div_cancel]))
+    (add unsafe 10% (by linarith [EuclideanDomain.eq_div_of_mul_eq_left]))
+    (add unsafe 10% (by linarith [div_sub']))
+    (add unsafe 10% (by linarith [mul_div_assoc']))
