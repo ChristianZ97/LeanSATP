@@ -34,6 +34,10 @@ uv run -m leansatp_runtime.service --serve \
 `satp` can auto-start the service, but manual startup avoids first-use
 cold-start timeouts.
 
+`satp` sends the current Lean goal state to the policy, matching
+`ChristianZ97/satp-policy-v2` reproduction code. The policy does not consume
+theorem-form input; Lean elaborates theorem declarations before the tactic runs.
+
 ## SATP Example
 
 Create `Demo.lean`:

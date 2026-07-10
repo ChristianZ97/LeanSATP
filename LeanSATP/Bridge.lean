@@ -168,17 +168,6 @@ private def collectFilteredHyps : TacticM (Array (Lean.Name × Lean.Format)) :=
     return acc
 
 /--
-Render the current tactic state as a theorem statement close to SATP's
-original (2025) training distribution.
--/
-private def collectFormalStatement : TacticM String := withMainContext do
-  let hyps ← collectFilteredHyps
-  let binderLines := hyps.map fun (n, t) => s!"  ({n} : {t.pretty})"
-  let renderedGoal ← ppExpr (← zetaReduce (← getMainTarget))
-  let lines := #["theorem _satpGoal"] ++ binderLines ++ #[s!"  : {renderedGoal.pretty} := by"]
-  return "\n".intercalate lines.toList
-
-/--
 Render the current tactic state as a raw goal state (Lean's `⊢` format),
 matching the pretrain distribution and the input modality used by
 BFS-Prover / ReProver / LeanCopilot. One hypothesis per line, goal
@@ -192,31 +181,18 @@ private def collectGoalState : TacticM String := withMainContext do
   return "\n".intercalate lines.toList
 
 /--
-Pick the input renderer based on `SATP_INPUT_MODE` env var (read once per
-call; cost is negligible vs the HTTP round-trip).
-  • `theorem` (default, 2026-04-21) → `collectFormalStatement` — original
-    2025 SATP finetune format. A/B on minif2f-test showed
-    theorem-level 103/244 vs goal-state 97/244 (overlap 95,
-    goal-only 2, theorem-only 8), so theorem stays the default.
-  • `goal` → `collectGoalState` — aligns with pretrain + peer tacGens
-    (BFS-Prover/ReProver/LeanCopilot).  Kept as opt-in for future
-    gap-level finetune experiments where the model is retrained on
-    bare goal-state inputs.
+satp-policy-v2 is trained and reproduced with goal-state policy inputs.
+Theorem-shaped proofs are elaborated by Lean first; the policy always
+sees the resulting tactic state.
 
 Codex pt.8 Finding 2 (retry alternate mode before fail) intentionally
 NOT implemented: the retry would double HTTP latency for every failed
-policy call, and per-call `satp_input_mode=...` telemetry already gives
-downstream analysis the signal to compute per-mode pass rate post-hoc.
-If a future ablation needs it, wire a second `tryInferLayer` call with
-the alternate mode between `snap.restore` and the trailing `throwError`
-in `runSatpCascade`.
+policy call. If a future ablation needs it, wire a second `tryInferLayer`
+call between `snap.restore` and the trailing `throwError` in
+`runSatpCascade`.
 -/
-private def collectSatpInput : TacticM String := do
-  let mode := (← IO.getEnv "SATP_INPUT_MODE").getD "theorem"
-  if mode == "theorem" then
-    collectFormalStatement
-  else
-    collectGoalState
+private def collectSatpInput : TacticM String :=
+  collectGoalState
 
 private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array String) := do
   let mut names := #[]
@@ -316,10 +292,12 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
 
 private def callInferenceService
     (cfg : RuntimeConfig)
-    (formalStatement : String)
+    (policyInput : String)
     (userLemmas : Array String)
     (stripRetrieval : Bool := false)
     (hintPriority : Nat := 40) : TacticM (Except MessageData String) := do
+  -- `formal_statement` is the legacy JSON field name. In v2 it carries
+  -- the policy input, which is a Lean goal-state string.
   -- Extra fields on top of the legacy (formal_statement / user_lemmas /
   -- tactic_name) contract drive the satp? 3-layer cascade:
   --   • strip_retrieval = true  → server drops the policy's retrieval-
@@ -328,7 +306,7 @@ private def callInferenceService
   --     user_lemmas as aesop rules (50 for cascade layers that carry
   --     hints, 40 for the legacy code path)
   let requestBody := Json.compress <| Json.mkObj [
-    ("formal_statement", Json.str formalStatement),
+    ("formal_statement", Json.str policyInput),
     ("user_lemmas", Json.arr <| userLemmas.map Json.str),
     ("tactic_name", Json.str "aesop"),
     ("strip_retrieval", Json.bool stripRetrieval),
@@ -439,7 +417,7 @@ private def fallbackToAesop
 -- should be retried or investigated rather than silently counted as
 -- SATP misses.
 inductive SatpFailKind where
-  | input    (msg : MessageData)   -- could not collect goal/theorem input
+  | input    (msg : MessageData)   -- could not collect policy input
   | request  (msg : MessageData)   -- /infer HTTP call itself failed
   | parse    (msg : MessageData)   -- returned text couldn't be parsed
   | exec     (msg : MessageData)   -- tactic parsed but elaboration threw
@@ -475,10 +453,10 @@ private def tryInferLayer
     (layerLabel : String)
     (clearKeep : Array String)
     (emitClear : Bool) : TacticM (Except SatpFailKind Unit) := do
-  let formalStatement ←
+  let policyInput ←
     try collectSatpInput
     catch e => return .error (.input e.toMessageData)
-  match ← callInferenceService cfg formalStatement userLemmas stripRetrieval hintPriority with
+  match ← callInferenceService cfg policyInput userLemmas stripRetrieval hintPriority with
   | .error reason => return .error (.request reason)
   | .ok tacticString =>
       match ← parseReturnedTactic tacticString with
@@ -542,12 +520,9 @@ private def runSatpCascade
     (lemmaNames : Array String)
     (traceScript : Bool := false) : TacticM Unit := do
   let _ := lemmaNames
-  -- Emit the resolved input-rendering mode once per call so downstream
-  -- tooling / ablation analysis can tell `theorem` and `goal` runs apart
-  -- without re-reading the env. Done here, before any saveState region,
-  -- so the record survives `snap.restore` on policy failure.
-  let inputMode := (← IO.getEnv "SATP_INPUT_MODE").getD "theorem"
-  logInfoAt stxRef s!"satp_input_mode={inputMode}"
+  -- Emit before any saveState region so the record survives
+  -- `snap.restore` on policy failure.
+  logInfoAt stxRef "satp_input_mode=goal"
   -- Separate event from the policy call so budget-sweep replay can
   -- account for cold-spawn overhead (health check + waitForServer can
   -- cost tens of seconds on the first call after boot; warm hits are

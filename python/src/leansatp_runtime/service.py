@@ -458,6 +458,10 @@ def render_full_proof(formal_statement: str, tactic: str) -> str:
     return formal_statement.rstrip() + "\n" + textwrap.indent(tactic.rstrip(), "  ")
 
 
+def _trace_label(policy_input: str) -> str:
+    return "Policy input" if "⊢" in policy_input else "Full proof"
+
+
 def _indent_block(block: str, prefix: str = "    ") -> str:
     """Indent a multi-line block for human-readable stderr traces."""
     cleaned = block.rstrip() or "<empty>"
@@ -471,9 +475,10 @@ def render_full_proof_trace(
     device: str,
 ) -> str:
     """Render the generated proof as a plain-text stderr block."""
+    label = _trace_label(formal_statement)
     return "\n".join(
         [
-            f"[LeanSATP] Full proof ({device}):",
+            f"[LeanSATP] {label} ({device}):",
             _indent_block(render_full_proof(formal_statement, tactic)),
         ]
     )
@@ -495,9 +500,10 @@ def print_full_proof_trace(
     _ensure_rich()
     if enable_color and _RichConsole and _RichSyntax:
         console = _make_console(stream)
+        label = _trace_label(formal_statement)
         log_server(
             "INFO",
-            f"[bold magenta][LeanSATP] Full proof[/bold magenta] "
+            f"[bold magenta][LeanSATP] {label}[/bold magenta] "
             f"([bold yellow]{device}[/bold yellow]):",
             stream=stream,
             enable_color=True,
@@ -535,7 +541,7 @@ def render_try_me_message(host: str, port: int) -> str:
         "curl --request POST \\\n"
         f"  --url http://{curl_host}:{port}/infer \\\n"
         "  --header 'Content-Type: application/json' \\\n"
-        '  --data \'{"formal_statement":"theorem t : True := by"}\' | jq\n',
+        '  --data \'{"formal_statement":"⊢ True"}\' | jq\n',
         "  ",
     )
 
