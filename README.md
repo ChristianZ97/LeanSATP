@@ -10,7 +10,7 @@ LeanSATP repository root so Lake uses this repo's toolchain and bundled deps.
 ## Setup
 
 ```bash
-git clone --branch satp-goal-state-input https://github.com/ChristianZ97/LeanSATP.git
+git clone --branch v2 https://github.com/ChristianZ97/LeanSATP.git
 cd LeanSATP
 ./setup.sh
 ```
