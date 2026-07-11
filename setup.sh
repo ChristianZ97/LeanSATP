@@ -144,11 +144,13 @@ LD_LIBRARY_PATH="$CT2LIB:${LD_LIBRARY_PATH:-}" lake build Mathlib LeanSATP LeanS
 log "5. SATP v2 checkpoint  ($SATP_CACHE_DIR/best_checkpoint.pt)"
 if [ "${SKIP_SATP_CKPT:-0}" = 1 ]; then
   echo "  SKIP_SATP_CKPT=1 — skipping"
-elif [ "$FORCE" = 1 ] || [ ! -f "$SATP_CACHE_DIR/best_checkpoint.pt" ]; then
+else
+  # always run: hf_hub_download is cache-backed (no-op at an unchanged pin),
+  # and a bumped SATP_HF_REVISION must refresh ckpt + assets + infer.py together
   uv run -m leansatp_runtime.service --download-only \
     --checkpoint "$SATP_CACHE_DIR/best_checkpoint.pt" \
     --checkpoint-source "$SATP_CKPT_SOURCE" --cache-dir "$SATP_CACHE_DIR"
   [ -f "$SATP_CACHE_DIR/best_checkpoint.pt" ] || die "checkpoint download failed"
-else echo "  already present — skip"; fi
+fi
 
 log "STANDALONE v4.26 ENV READY — satp + bfsaesop build on v4.26"

@@ -134,9 +134,19 @@ def ensure_checkpoint_download(
     if checkpoint_source.startswith("hf://"):
         from huggingface_hub import hf_hub_download
 
+        from leansatp_runtime.hf_pin import HF_REPO, REVISION
+
         repo_id, filename = _parse_hf_checkpoint_source(checkpoint_source)
         with _suppress_startup_noise():
-            downloaded = Path(hf_hub_download(repo_id=repo_id, filename=filename))
+            downloaded = Path(
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    # pin the whole bundle (source + weights + assets) to one
+                    # immutable revision — see hf_pin.py
+                    revision=REVISION if repo_id == HF_REPO else None,
+                )
+            )
     else:
         downloaded = _normalize_local_path(checkpoint_source)
         if not downloaded.exists() or not downloaded.is_file():
@@ -165,7 +175,10 @@ def ensure_retrieval_download(
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
 
+    from leansatp_runtime.hf_pin import HF_REPO, REVISION
+
     repo_id, _ = _parse_hf_checkpoint_source(checkpoint_source)
+    revision = REVISION if repo_id == HF_REPO else None
     destination_dir = Path(cache_dir).expanduser().resolve(strict=False)
     destination_dir.mkdir(parents=True, exist_ok=True)
 
@@ -177,7 +190,11 @@ def ensure_retrieval_download(
         target = destination_dir / Path(filename).name
         try:
             with _suppress_startup_noise():
-                source_path = Path(hf_hub_download(repo_id=repo_id, filename=filename))
+                source_path = Path(
+                    hf_hub_download(
+                        repo_id=repo_id, filename=filename, revision=revision
+                    )
+                )
         except (EntryNotFoundError, HfHubHTTPError):
             continue
         if source_path.resolve() != target.resolve():
@@ -393,6 +410,8 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
     checkpoint_path = ensure_local_checkpoint(checkpoint_path)
     device = device or preferred_device()
 
+    # weights_only=False: the ckpt embeds numpy objects; acceptable because
+    # every hf:// artifact is pinned to one immutable revision (hf_pin.py)
     ckpt = _torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
 
@@ -1188,6 +1207,14 @@ def main() -> int:
             retrieval_paths = ensure_retrieval_download(
                 args.cache_dir, args.checkpoint_source
             )
+        # prefetch + validate the pinned inference source so a later offline
+        # service start never has to contact HF (importing runs the download);
+        # only for the v2 repo — v1/custom sources never touch the v2 pin
+        from leansatp_runtime.hf_pin import HF_REPO as _pin_repo
+
+        if args.checkpoint_source.startswith(f"hf://{_pin_repo}/"):
+            from leansatp_runtime.models import policy_v2 as _pv2  # noqa: F401
+
         print(
             json.dumps(
                 {

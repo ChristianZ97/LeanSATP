@@ -10,7 +10,7 @@ LeanSATP repository root so Lake uses this repo's toolchain and bundled deps.
 ## Setup
 
 ```bash
-git clone --branch feat/align-v4.26 https://github.com/ChristianZ97/LeanSATP.git
+git clone --branch satp-goal-state-input https://github.com/ChristianZ97/LeanSATP.git
 cd LeanSATP
 ./setup.sh
 ```
@@ -34,9 +34,18 @@ uv run -m leansatp_runtime.service --serve \
 `satp` can auto-start the service, but manual startup avoids first-use
 cold-start timeouts.
 
-`satp` sends the current Lean goal state to the policy, matching
-`ChristianZ97/satp-policy-v2` reproduction code. The policy does not consume
-theorem-form input; Lean elaborates theorem declarations before the tactic runs.
+`satp` sends the current Lean goal state to the policy. The policy does not
+consume theorem-form input; Lean elaborates theorem declarations before the
+tactic runs.
+
+Single source of truth: the v2 inference implementation (model, greedy
+decode, tactic-string rendering) is `infer.py` in the
+[`ChristianZ97/satp-policy-v2`](https://huggingface.co/ChristianZ97/satp-policy-v2)
+HF repo — the same file that reproduces the model card numbers. The service
+downloads it at a pinned revision (see `models/policy_v2.py`) together with
+the checkpoint, so this repo hosts no second copy of the inference code.
+Evaluation numbers are defined by the HF repo's `reproduce.py`; this repo is
+the way you *use* the policy from Lean.
 
 ## SATP Example
 
