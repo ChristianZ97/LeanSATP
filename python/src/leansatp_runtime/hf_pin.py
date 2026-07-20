@@ -13,7 +13,7 @@ sweep (92/244) before trusting any number.
 import os
 
 HF_REPO = "ChristianZ97/satp-policy-v2-alphaproof"
-_DEFAULT_REVISION = "4bdcd7bb5107d17545e3dba4e0ff5ab2b9b293f0"
+_DEFAULT_REVISION = "a654c92d305730b8f0b251e01392a5934483e6a4"
 
 REVISION = os.environ.get("SATP_HF_REVISION", _DEFAULT_REVISION).strip()
 if not REVISION:
