@@ -39,7 +39,7 @@ LEANCOPILOT_TAG="v4.26.0"
 MATHLIB_URL="https://github.com/leanprover-community/mathlib4.git"
 MATHLIB_COMMIT="2df2f0150c275ad53cb3c90f7c98ec15a56a1a67"
 
-SATP_CKPT_SOURCE="${SATP_CKPT_SOURCE:-hf://ChristianZ97/satp-policy-v2/best_checkpoint.pt}"
+SATP_CKPT_SOURCE="${SATP_CKPT_SOURCE:-hf://ChristianZ97/satp-policy-v2-alphaproof/best_checkpoint.pt}"
 SATP_CACHE_DIR="${SATP_CACHE_DIR:-$ROOT/cache_v2}"
 
 log() { printf '\n\033[1m[LeanSATP setup] %s\033[0m\n' "$*"; }

@@ -1,4 +1,4 @@
-"""Single pin for every artifact fetched from the satp-policy-v2 HF repo.
+"""Single pin for every artifact fetched from the satp-policy-v2-alphaproof HF repo.
 
 Source (infer.py), checkpoint, and retrieval assets are all resolved at this
 one immutable commit, so the executable bundle can never be version-skewed:
@@ -12,8 +12,8 @@ sweep (92/244) before trusting any number.
 
 import os
 
-HF_REPO = "ChristianZ97/satp-policy-v2"
-_DEFAULT_REVISION = "449f192d0e4d7d2f92d4bd6edec5bb73300b48af"
+HF_REPO = "ChristianZ97/satp-policy-v2-alphaproof"
+_DEFAULT_REVISION = "4bdcd7bb5107d17545e3dba4e0ff5ab2b9b293f0"
 
 REVISION = os.environ.get("SATP_HF_REVISION", _DEFAULT_REVISION).strip()
 if not REVISION:
