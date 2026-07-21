@@ -32,6 +32,38 @@ Environment shared by the `v2` and `alphaproof` branches:
 - A proof counts only with zero `sorry` and a clean `#print axioms` audit
   (no `sorryAx`).
 
+## Results (v2)
+
+Tactic-level, as defined by `reproduce.py` in the pinned HF repo:
+miniF2F-test **92/244**, reproduced twice bit-identically, all 92 rebuilt by
+`lake`; miniF2F-valid 91/244 (kimina reports 94; 3 close only via `sorryAx`
+and are rejected by the axiom audit). The Lean-side `satp?` tactic reproduces
+the same 92-problem test set end to end.
+
+Full DSP pipeline (draft → sketch → prove cascade) on miniF2F-test (244):
+
+| mode | proved / 244 |
+|---|---|
+| `satp` cascade, deterministic ×1 | 132 |
+| `satpbfsaesop` ×1 (n=3) | 185 / 185 / 187 |
+| `satpbfsaesop4x` (n=3) | 189 / 189 / 192 |
+
+A fourth ×1 run (179) is excluded under a pre-registered rule: the disk
+filled (ENOSPC) mid-run. Pipeline numbers are produced by the private
+companion repo `SATP-DSP-Eval`, pinned at commit `b84f4bde165e`; this branch
+supplies the SATP policy service those runs call.
+
+Draft/sketch provenance: all drafts and sketches were generated once under
+the v1 paper environment (Lean `v4.17.0-rc1` + DSP-Plus Mathlib fork,
+Qwen3.5-27B-FP8 drafter/sketcher) and are reused unchanged in every v2 run —
+the sketch axis is held fixed, so v1 and v2 numbers are directly comparable.
+Only proving and verification run in this branch's `v4.26.0` environment.
+31/244 test statements use pre-v4.26 big-operator syntax (`∑ x in s, …`); a
+purely syntactic compatibility macro (`_BIGOP_COMPAT` in `SATP-DSP-Eval`'s
+`scripts/build_stages.py`, injected at the prove/e2e stage only) lets those
+statements and the reused sketches elaborate under `v4.26` without editing
+either.
+
 ## Setup
 
 ```bash
