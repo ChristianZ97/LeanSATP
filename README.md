@@ -50,8 +50,10 @@ Full DSP pipeline (draft → sketch → prove cascade) on miniF2F-test (244):
 
 A fourth ×1 run (179) is excluded under a pre-registered rule: the disk
 filled (ENOSPC) mid-run. Pipeline numbers are produced by the private
-companion repo `SATP-DSP-Eval`, pinned at commit `b84f4bde165e`; this branch
-supplies the SATP policy service those runs call.
+companion repo `SATP-DSP-Eval`, pinned at commit `d10ef888f5f2` — the HEAD
+under which every run in the table executed, whose LeanSATP submodule
+gitlink resolves to this branch; this branch supplies the SATP policy
+service those runs call.
 
 Draft/sketch provenance: all drafts and sketches were generated once under
 the v1 paper environment (Lean `v4.17.0-rc1` + DSP-Plus Mathlib fork,
