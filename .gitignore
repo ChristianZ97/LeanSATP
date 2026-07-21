@@ -14,3 +14,5 @@ uv.lock
 .DS_Store
 deps/
 deps/_lc_build.log
+proofs/minif2f_test_v2/traced/
+proofs/minif2f_test_v2/manifest_run.jsonl
