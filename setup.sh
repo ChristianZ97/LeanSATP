@@ -68,9 +68,18 @@ mkdir -p "$DEPS"
 PINS="$TOOLCHAIN|$AESOP_COMMIT|$LEANCOPILOT_TAG|$MATHLIB_COMMIT"
 if [ "$(cat "$DEPS/.pins" 2>/dev/null || true)" != "$PINS" ]; then
   if [ -n "$(ls -A "$DEPS" 2>/dev/null)" ] || [ -d "$ROOT/.lake" ]; then
-    log "pin set changed/unknown — wiping deps/ and .lake/ for a clean rebuild"
-    rm -rf "$DEPS" "$ROOT/.lake"
-    mkdir -p "$DEPS"
+    # An unstamped tree whose checkouts already match every pin (a build from a
+    # pre-stamp v4.27 commit) is same-era: seed the stamp, keep the build.
+    LC_WANT="$(git -C "$DEPS/LeanCopilot" rev-parse "$LEANCOPILOT_TAG^{commit}" 2>/dev/null || true)"
+    if [ "$(git -C "$DEPS/aesop" rev-parse HEAD 2>/dev/null)" = "$AESOP_COMMIT" ] \
+       && [ "$(git -C "$DEPS/mathlib4" rev-parse HEAD 2>/dev/null)" = "$MATHLIB_COMMIT" ] \
+       && [ -n "$LC_WANT" ] && [ "$(git -C "$DEPS/LeanCopilot" rev-parse HEAD 2>/dev/null)" = "$LC_WANT" ]; then
+      log "unstamped tree matches the pin set — seeding stamp, keeping existing build"
+    else
+      log "pin set changed/unknown — wiping deps/ and .lake/ for a clean rebuild"
+      rm -rf "$DEPS" "$ROOT/.lake"
+      mkdir -p "$DEPS"
+    fi
   fi
   printf '%s' "$PINS" > "$DEPS/.pins"
 fi
