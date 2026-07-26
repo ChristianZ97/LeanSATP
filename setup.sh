@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # ============================================================================
-# LeanSATP/setup.sh  —  STANDALONE Lean v4.26 environment for satp + bfsaesop
+# LeanSATP/setup.sh  —  STANDALONE Lean v4.27 environment for satp + bfsaesop
 # ----------------------------------------------------------------------------
-# `git clone <this repo> && ./setup.sh` gives a self-contained v4.26 toolchain:
+# `git clone <this repo> && ./setup.sh` gives a self-contained v4.27 toolchain:
 # no DSP-Plus, no kimina-lean-server, no parent SATP-DSP-Eval needed.
 #
 # caochenrui's dsp+ fork (the v4.17 line) only exists at v4.17, so we replicate
-# its lakefile structure on v4.26 OFFICIAL upstream sources, built into deps/:
+# its lakefile structure on v4.27 OFFICIAL upstream sources, built into deps/:
 #
-#   deps/aesop        = leanprover-community/aesop @ 2f6d238 + bfsScore patch
+#   deps/aesop        = leanprover-community/aesop @ cb837cc + bfsScore patch
+#                       (mathlib v4.27's own pinned aesop rev)
 #                       (aesop-bfsscore.patch, committed next to this script)
-#   deps/LeanCopilot  = lean-dojo/LeanCopilot     @ v4.26.0  (+ CTranslate2)
-#   deps/mathlib4     = leanprover-community/mathlib4 @ 2df2f0150c (v4.26.0),
+#   deps/LeanCopilot  = lean-dojo/LeanCopilot     @ v4.27.0  (+ CTranslate2)
+#   deps/mathlib4     = leanprover-community/mathlib4 @ a3a10db0e9 (v4.27.0,
+#                       = ChristianZ97/*-satp-v4.27 dataset pin),
 #                       lakefile rewired to require the two above + link CT2
 #   (this package)    = LeanSATP; its lakefile requires mathlib from deps/mathlib4
 #
@@ -33,12 +35,14 @@ PATCH="$ROOT/aesop-bfsscore.patch"
 FORCE="${FORCE:-0}"
 
 AESOP_URL="https://github.com/leanprover-community/aesop.git"
-AESOP_COMMIT="2f6d238744c4cb07fdc91240feaf5d4221a27931"
+AESOP_COMMIT="cb837cc26236ada03c81837bebe0acd9c70ced7d"
 LEANCOPILOT_URL="https://github.com/lean-dojo/LeanCopilot.git"
-LEANCOPILOT_TAG="v4.26.0"
+LEANCOPILOT_TAG="v4.27.0"
 MATHLIB_URL="https://github.com/leanprover-community/mathlib4.git"
-MATHLIB_COMMIT="2df2f0150c275ad53cb3c90f7c98ec15a56a1a67"
+MATHLIB_COMMIT="a3a10db0e9d66acbebf76c5e6a135066525ac900"
 
+# NOTE: default checkpoint is still the v4.26-era v2 policy — the v4.27 ckpt
+# is not published yet. Override SATP_CKPT_SOURCE when it ships.
 SATP_CKPT_SOURCE="${SATP_CKPT_SOURCE:-hf://ChristianZ97/satp-policy-v2/best_checkpoint.pt}"
 SATP_CACHE_DIR="${SATP_CACHE_DIR:-$ROOT/cache_v2}"
 
@@ -52,7 +56,7 @@ command -v git   >/dev/null || die "git not found"
 command -v cmake >/dev/null || die "cmake not found (needed for CTranslate2)"
 command -v cc    >/dev/null || die "c compiler not found"
 [ -f "$PATCH" ] || die "missing $PATCH"
-elan toolchain install leanprover/lean4:v4.26.0 >/dev/null 2>&1 || true
+elan toolchain install leanprover/lean4:v4.27.0 >/dev/null 2>&1 || true
 mkdir -p "$DEPS"
 echo "  LeanSATP: $ROOT"
 echo "  deps:     $DEPS"
@@ -153,4 +157,4 @@ else
   [ -f "$SATP_CACHE_DIR/best_checkpoint.pt" ] || die "checkpoint download failed"
 fi
 
-log "STANDALONE v4.26 ENV READY — satp + bfsaesop build on v4.26"
+log "STANDALONE v4.27 ENV READY — satp + bfsaesop build on v4.27"
