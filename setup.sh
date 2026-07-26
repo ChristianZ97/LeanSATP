@@ -34,6 +34,7 @@ CT2LIB="$DEPS/LeanCopilot/.lake/build/lib"
 PATCH="$ROOT/aesop-bfsscore.patch"
 FORCE="${FORCE:-0}"
 
+TOOLCHAIN="leanprover/lean4:v4.27.0"
 AESOP_URL="https://github.com/leanprover-community/aesop.git"
 AESOP_COMMIT="cb837cc26236ada03c81837bebe0acd9c70ced7d"
 LEANCOPILOT_URL="https://github.com/lean-dojo/LeanCopilot.git"
@@ -56,8 +57,23 @@ command -v git   >/dev/null || die "git not found"
 command -v cmake >/dev/null || die "cmake not found (needed for CTranslate2)"
 command -v cc    >/dev/null || die "c compiler not found"
 [ -f "$PATCH" ] || die "missing $PATCH"
-elan toolchain install leanprover/lean4:v4.27.0 >/dev/null 2>&1 || true
+elan toolchain install "$TOOLCHAIN" >/dev/null 2>&1 || true
 mkdir -p "$DEPS"
+# Cross-era safety: deps/ and .lake/ are gitignored, so they survive git branch
+# switches. If the recorded pin set differs — or is absent while build artifacts
+# exist (an in-place v4.26 -> v4.27 upgrade) — stale oleans would poison the new
+# toolchain. Wipe and rebuild everything in that case.
+# ponytail: one stamp for all stages — coarse wipe over per-stage invalidation;
+# the mathlib stage dominates rebuild cost anyway.
+PINS="$TOOLCHAIN|$AESOP_COMMIT|$LEANCOPILOT_TAG|$MATHLIB_COMMIT"
+if [ "$(cat "$DEPS/.pins" 2>/dev/null || true)" != "$PINS" ]; then
+  if [ -n "$(ls -A "$DEPS" 2>/dev/null)" ] || [ -d "$ROOT/.lake" ]; then
+    log "pin set changed/unknown — wiping deps/ and .lake/ for a clean rebuild"
+    rm -rf "$DEPS" "$ROOT/.lake"
+    mkdir -p "$DEPS"
+  fi
+  printf '%s' "$PINS" > "$DEPS/.pins"
+fi
 echo "  LeanSATP: $ROOT"
 echo "  deps:     $DEPS"
 
@@ -149,6 +165,10 @@ log "5. SATP v2 checkpoint  ($SATP_CACHE_DIR/best_checkpoint.pt)"
 if [ "${SKIP_SATP_CKPT:-0}" = 1 ]; then
   echo "  SKIP_SATP_CKPT=1 — skipping"
 else
+  case "$SATP_CKPT_SOURCE" in *satp-policy-v2/*)
+    echo "  WARNING: v4.26-era policy (satp-policy-v2) on a v4.27 env — placeholder"
+    echo "           until the v4.27 policy ships; then override SATP_CKPT_SOURCE." ;;
+  esac
   # always run: hf_hub_download is cache-backed (no-op at an unchanged pin),
   # and a bumped SATP_HF_REVISION must refresh ckpt + assets + infer.py together
   uv run -m leansatp_runtime.service --download-only \
