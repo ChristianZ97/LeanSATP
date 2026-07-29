@@ -48,23 +48,29 @@ Full DSP pipeline (draft → sketch → prove cascade) on miniF2F-test (244):
 | `satpbfsaesop` ×1 (n=3) | 185 / 185 / 187 |
 | `satpbfsaesop4x` (n=3) | 189 / 189 / 192 |
 
-A fourth ×1 run (179) is excluded under a pre-registered rule: the disk
-filled (ENOSPC) mid-run. Pipeline numbers are produced by the private
-companion repo `SATP-DSP-Eval`, pinned at commit `d10ef888f5f2` — the HEAD
-under which every run in the table executed, whose LeanSATP submodule
-gitlink resolves to this branch; this branch supplies the SATP policy
-service those runs call.
+Pipeline numbers are produced by the private companion repo `SATP-DSP-Eval`,
+pinned at commit `d10ef888f5f2` — the HEAD under which every run in the table
+executed, whose LeanSATP submodule gitlink resolves to this branch; this
+branch supplies the SATP policy service those runs call.
 
-Draft/sketch provenance: all drafts and sketches were generated once under
-the v1 paper environment (Lean `v4.17.0-rc1` + DSP-Plus Mathlib fork,
-Qwen3.5-27B-FP8 drafter/sketcher) and are reused unchanged in every v2 run —
-the sketch axis is held fixed, so v1 and v2 numbers are directly comparable.
-Only proving and verification run in this branch's `v4.26.0` environment.
-31/244 test statements use pre-v4.26 big-operator syntax (`∑ x in s, …`); a
-purely syntactic compatibility macro (`_BIGOP_COMPAT` in `SATP-DSP-Eval`'s
-`scripts/build_stages.py`, injected at the prove/e2e stage only) lets those
-statements and the reused sketches elaborate under `v4.26` without editing
-either.
+### Which environment ran what
+
+The pipeline spans two Lean environments by design: the draft and sketch axes
+are pinned to their v1-paper generation so v1 and v2 numbers stay directly
+comparable, and only the proving side moved to `v4.26.0`.
+
+| stage | environment | v2 status |
+|---|---|---|
+| Statements (`minif2f.jsonl`, vendored from DSP-Plus) | `v4.17.0-rc1`-era Lean text | unchanged |
+| Draft + Sketch (Qwen3.5-27B-FP8) | Lean `v4.17.0-rc1` + DSP-Plus Mathlib fork | reused verbatim from v1 |
+| Prove cascade (SATP policy + BFS) | this branch's standalone `v4.26.0` | re-run |
+| Verification (`lake env lean`, `#print axioms`) | this branch's standalone `v4.26.0` | re-run |
+
+Because the statement text predates `v4.26`, 31/244 test statements use the
+removed big-operator syntax (`∑ x in s, …`). A purely syntactic compatibility
+macro (`_BIGOP_COMPAT` in `SATP-DSP-Eval`'s `scripts/build_stages.py`, injected
+at the prove/e2e stage only) lets those statements and the reused sketches
+elaborate under `v4.26` without editing either.
 
 ## Setup
 
