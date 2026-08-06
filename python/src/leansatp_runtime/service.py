@@ -23,9 +23,13 @@ from typing import Any, Optional
 _DEFAULT_MAX_INFLIGHT = 8
 _DEFAULT_INFER_CACHE_SIZE = 10000
 _SEMAPHORE_ACQUIRE_TIMEOUT = 45.0  # must stay below Bridge.lean's curl timeout
-DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/satp-policy-v2/best_checkpoint.pt"
+DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/satp-policy-v4.27/best_checkpoint.pt"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache_v2")
+# Era-tagged on purpose: the cache holds the era's weights next to its
+# retrieval assets, and the two eras' decode constants are incompatible
+# (see hf_pin.py). A shared directory would let a stale
+# ``best_checkpoint.pt`` become the default checkpoint after a pin bump.
+DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache_v427")
 DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 
 # Retrieval assets live on the same HF repo as the checkpoint, under a
@@ -37,7 +41,7 @@ DEFAULT_RETRIEVAL_FILES = (
     "premises/premise_embeddings.npy",  # v1 (satp-policy-goal) layout
     "premises/premises_raw.npy",
     "premises/bm25_index.pkl",
-    "cache/premise_embeddings.npy",  # v2 (satp-policy-v2) layout; absent names skip silently
+    "cache/premise_embeddings.npy",  # v2 / v4.27 layout; absent names skip silently
     "cache/mathlib4_premises.txt",
     # names flatten to basenames — don't point two ckpt generations at one cache dir
 )
@@ -134,9 +138,14 @@ def ensure_checkpoint_download(
     if checkpoint_source.startswith("hf://"):
         from huggingface_hub import hf_hub_download
 
-        from leansatp_runtime.hf_pin import HF_REPO, REVISION
+        from leansatp_runtime.hf_pin import revision_for
 
         repo_id, filename = _parse_hf_checkpoint_source(checkpoint_source)
+        # Resolved *outside* the suppression block on purpose: it warns when
+        # repo_id is unpinned, and _suppress_startup_noise redirects both
+        # stdout and stderr — inside, the one call site that fetches the
+        # actual weights would be the only silent one.
+        revision = revision_for(repo_id)
         with _suppress_startup_noise():
             downloaded = Path(
                 hf_hub_download(
@@ -144,7 +153,7 @@ def ensure_checkpoint_download(
                     filename=filename,
                     # pin the whole bundle (source + weights + assets) to one
                     # immutable revision — see hf_pin.py
-                    revision=REVISION if repo_id == HF_REPO else None,
+                    revision=revision,
                 )
             )
     else:
@@ -175,10 +184,10 @@ def ensure_retrieval_download(
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
 
-    from leansatp_runtime.hf_pin import HF_REPO, REVISION
+    from leansatp_runtime.hf_pin import revision_for
 
     repo_id, _ = _parse_hf_checkpoint_source(checkpoint_source)
-    revision = REVISION if repo_id == HF_REPO else None
+    revision = revision_for(repo_id)
     destination_dir = Path(cache_dir).expanduser().resolve(strict=False)
     destination_dir.mkdir(parents=True, exist_ok=True)
 

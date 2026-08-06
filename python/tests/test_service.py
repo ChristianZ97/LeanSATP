@@ -5,12 +5,14 @@ from __future__ import annotations
 import errno
 import json
 import sys
+import tempfile
 import threading
 import warnings
 import unittest
 from collections import OrderedDict
 from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
+from pathlib import Path
 from unittest.mock import patch
 
 from leansatp_runtime import service
@@ -505,6 +507,42 @@ class SATPServerLifecycleTests(unittest.TestCase):
         self.assertIn("INFO     Finished server process [", output)
         self.assertNotIn("Traceback", output)
         self.assertEqual(server_events, ["bound", "closed"])
+
+
+class UnpinnedRepoWarningTest(unittest.TestCase):
+    """The unpinned-repo warning has to survive the suppression block.
+
+    ensure_checkpoint_download wraps hf_hub_download in
+    _suppress_startup_noise(), which redirects *both* stdout and stderr. When
+    the revision is resolved inside that block the warning vanishes — and that
+    call site is the one fetching the actual weights, so the single case the
+    warning exists for is the single case it would not be printed in. Caught
+    in review 2026-08-06; this pins the fix.
+    """
+
+    def test_revision_for_matches_the_inline_conditional_it_replaced(self):
+        from leansatp_runtime.hf_pin import HF_REPO, REVISION, revision_for
+
+        self.assertEqual(revision_for(HF_REPO), REVISION)
+        self.assertIsNone(revision_for("someone/else"))
+
+    def test_unpinned_warning_reaches_stderr_not_stdout(self):
+        out, err = StringIO(), StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = str(Path(tmp) / "best_checkpoint.pt")
+            Path(dest).touch()
+            with (
+                redirect_stdout(out),
+                redirect_stderr(err),
+                patch("huggingface_hub.hf_hub_download", lambda **kw: dest),
+            ):
+                service.ensure_checkpoint_download(
+                    dest, "hf://someone/unpinned/best_checkpoint.pt"
+                )
+
+        self.assertIn("not the pinned repo", err.getvalue())
+        # stdout stays machine-readable: --download-only prints JSON there
+        self.assertNotIn("not the pinned repo", out.getvalue())
 
 
 if __name__ == "__main__":

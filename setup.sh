@@ -24,7 +24,7 @@
 # Usage:
 #   ./setup.sh                   # build the whole env + download the checkpoint
 #   FORCE=1 ./setup.sh           # wipe deps/ and rebuild every stage
-#   SKIP_SATP_CKPT=1 ./setup.sh  # skip the 1.1 GB SATP v2 checkpoint download
+#   SKIP_SATP_CKPT=1 ./setup.sh  # skip the 1.1 GB SATP v4.27 checkpoint download
 # ============================================================================
 set -euo pipefail
 
@@ -42,10 +42,12 @@ LEANCOPILOT_TAG="v4.27.0"
 MATHLIB_URL="https://github.com/leanprover-community/mathlib4.git"
 MATHLIB_COMMIT="a3a10db0e9d66acbebf76c5e6a135066525ac900"
 
-# NOTE: default checkpoint is still the v4.26-era v2 policy — the v4.27 ckpt
-# is not published yet. Override SATP_CKPT_SOURCE when it ships.
-SATP_CKPT_SOURCE="${SATP_CKPT_SOURCE:-hf://ChristianZ97/satp-policy-v2/best_checkpoint.pt}"
-SATP_CACHE_DIR="${SATP_CACHE_DIR:-$ROOT/cache_v2}"
+# Default checkpoint = the published v4.27 policy (2026-08-06). Keep this in
+# step with hf_pin.py / service.py's DEFAULT_CHECKPOINT_SOURCE — the three must
+# name the same era or the service loads weights its decode constants can't
+# read (build_policy_v2 refuses rather than mis-rendering).
+SATP_CKPT_SOURCE="${SATP_CKPT_SOURCE:-hf://ChristianZ97/satp-policy-v4.27/best_checkpoint.pt}"
+SATP_CACHE_DIR="${SATP_CACHE_DIR:-$ROOT/cache_v427}"
 
 log() { printf '\n\033[1m[LeanSATP setup] %s\033[0m\n' "$*"; }
 die() { printf '\033[31m[LeanSATP setup] ERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -169,15 +171,26 @@ LD_LIBRARY_PATH="$CT2LIB:${LD_LIBRARY_PATH:-}" lake build Mathlib LeanSATP LeanS
 [ -n "$(find .lake/packages/Qq/.lake/build/lib -name 'Qq.olean' 2>/dev/null)" ] \
   || die "Mathlib closure incomplete (Qq unbuilt) — standalone 'import Mathlib' would fail"
 
-# --- 5. SATP v2 policy checkpoint ------------------------------------------
-log "5. SATP v2 checkpoint  ($SATP_CACHE_DIR/best_checkpoint.pt)"
+# --- 5. SATP v4.27 policy checkpoint ------------------------------------------
+log "5. SATP v4.27 checkpoint  ($SATP_CACHE_DIR/best_checkpoint.pt)"
 if [ "${SKIP_SATP_CKPT:-0}" = 1 ]; then
   echo "  SKIP_SATP_CKPT=1 — skipping"
 else
+  # Only catches the plain v2 repo by name. It cannot catch a same-cardinality
+  # sibling (satp-policy-v2-alphaproof is also 19/172) or a local path — those
+  # pass every automatic check, so the pin is the only thing that identifies
+  # which training run gets served.
   case "$SATP_CKPT_SOURCE" in *satp-policy-v2/*)
-    echo "  WARNING: v4.26-era policy (satp-policy-v2) on a v4.27 env — placeholder"
-    echo "           until the v4.27 policy ships; then override SATP_CKPT_SOURCE." ;;
+    echo "  WARNING: v4.26-era policy (satp-policy-v2) on a v4.27 env. Its decode"
+    echo "           constants differ (LEMMA_HOST_POOL 20 vs 19), so the service"
+    echo "           will refuse to load it against this branch's pin."
+    echo "           There is no env override for the repo — switching eras means"
+    echo "           editing HF_REPO in python/src/leansatp_runtime/hf_pin.py, or"
+    echo "           using the v2 branch. Unset SATP_CKPT_SOURCE for v4.27." ;;
   esac
+  # Downloading is not the same as having a usable install: only the checkpoint
+  # is asserted below. Retrieval assets fetch best-effort and skip silently, and
+  # a policy served without them raises on every /infer.
   # always run: hf_hub_download is cache-backed (no-op at an unchanged pin),
   # and a bumped SATP_HF_REVISION must refresh ckpt + assets + infer.py together
   uv run -m leansatp_runtime.service --download-only \

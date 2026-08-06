@@ -1,9 +1,16 @@
-"""v2 policy adapter — the implementation lives on Hugging Face.
+"""v2-architecture policy adapter — the implementation lives on Hugging Face.
 
-The single source of truth for satp-policy-v2 inference (model classes,
-greedy decode, tactic-string rendering) is ``infer.py`` in the HF model repo
-``ChristianZ97/satp-policy-v2`` — the same file that reproduces the model
-card numbers. This module downloads that file at a **pinned revision**,
+"v2" here names the **architecture** (factored joint-action heads, detected
+via the ``tactic_heads.tactic_emb`` fingerprint), not the checkpoint era: the
+v4.27 policy shares this architecture and loads through this same module.
+Which era is served is decided by ``hf_pin.py`` alone.
+
+The single source of truth for inference (model classes, greedy decode,
+tactic-string rendering) is ``infer.py`` in the pinned HF model repo — the
+same file that reproduces that repo's model card numbers. Note the decode
+constants travel with it: ``LEMMA_HOST_POOL`` is 20 entries on v2 and 19 on
+v4.27, so pin and checkpoint must always move together.
+This module downloads that file at a **pinned revision**,
 imports it, and adapts it to the two entry points the service consumes
 (``build_policy_v2`` + ``policy_tactic_v2``), so the tactic path and the
 card's eval harness cannot drift apart: same inference, one code.
@@ -31,7 +38,7 @@ import os
 import sys
 from pathlib import Path
 
-from ..hf_pin import HF_REPO, REVISION
+from ..hf_pin import HF_REPO, REVISION, revision_for
 
 _INFER_SOURCE = os.environ.get("SATP_INFER_SOURCE", f"hf://{HF_REPO}/infer.py")
 
@@ -51,7 +58,7 @@ def _load_infer_module():
             path = hf_hub_download(
                 repo_id=repo_id,
                 filename=parts[2],
-                revision=REVISION if repo_id == HF_REPO else None,
+                revision=revision_for(repo_id),
             )
         except Exception as exc:  # offline / bad pin — do NOT masquerade as a
             # missing checkpoint (service maps FileNotFoundError to that help)
@@ -201,10 +208,13 @@ def policy_tactic_v2(
     """Greedy decode via the pinned HF infer.py (v2 factored heads)."""
     if not retrieval_enabled:
         raise RuntimeError(
-            "satp-policy-v2 requires the premise cache "
-            "(cache_v2/premise_embeddings.npy + mathlib4_premises.txt) — run "
-            "./setup.sh; serving without retrieval would emit configs that do "
-            "not reproduce the model card"
+            # No directory name here: this function never sees cache_dir, and
+            # naming one era's default (it used to say cache_v2/) is wrong the
+            # moment the pin moves. ./setup.sh knows where the cache belongs.
+            "the satp policy requires the premise cache "
+            "(premise_embeddings.npy + mathlib4_premises.txt) in the "
+            "service's --cache-dir — run ./setup.sh; serving without "
+            "retrieval would emit configs that do not reproduce the model card"
         )
     # ablation/strip calls pay a (discarded) retrieve so the decode path stays
     # single-sourced — one infer.py call for every mode

@@ -42,7 +42,7 @@ private def defaultRepoRoot : IO FilePath := do
   Lean.realPathNormalized (← packageRoot)
 
 private def defaultCacheDir : IO String := do
-  return (((← defaultRepoRoot) / "cache_v2").normalize.toString)
+  return (((← defaultRepoRoot) / "cache_v427").normalize.toString)
 
 private def defaultCheckpointFromCacheDir (cacheDir : String) : String :=
   ((FilePath.mk cacheDir) / "best_checkpoint.pt").normalize.toString
@@ -149,7 +149,7 @@ private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "
 
 /--
 Render the current tactic state with Lean's standard goal printer
-(`Meta.ppGoal`) — the same rendering that produced satp-policy-v2's
+(`Meta.ppGoal`) — the same rendering that produced the policy's
 training / eval `goal_state` inputs (same-type binders merged into one
 line: `b h v : ℝ`). The byt5 policy is byte-sensitive, so any rendering
 drift shifts decodes: the previous hand-rolled one-hypothesis-per-line
@@ -162,7 +162,7 @@ private def collectGoalState : TacticM String := withMainContext do
   return (← ppGoal (← getMainGoal)).pretty
 
 /--
-satp-policy-v2 is trained and reproduced with goal-state policy inputs.
+The satp policy is trained and reproduced with goal-state policy inputs.
 Theorem-shaped proofs are elaborated by Lean first; the policy always
 sees the resulting tactic state.
 

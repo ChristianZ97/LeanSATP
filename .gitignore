@@ -4,6 +4,7 @@ lake-manifest.json
 cache/
 cache_goal/
 cache_v2/
+cache_v427/
 SATP-Training/
 python/.ruff_cache/
 python/.mypy_cache/
