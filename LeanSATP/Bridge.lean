@@ -345,13 +345,23 @@ private def parseReturnedTactic
   | .ok tacticSeq =>
     return .ok tacticSeq
 
+-- Runtime-inclusive except-shaping. Plain `try/catch` — and the outer
+-- `first` combinator at every call site — RETHROW runtime exceptions
+-- (`maxRecDepth`/heartbeats, see `Core.tryCatch`), so e.g. a `by simp`
+-- rule inside the emitted config blowing `maxRecDepth` would abort the
+-- whole gap and shadow every later cascade branch. Interrupts still
+-- propagate (tryCatchRuntimeEx never catches those).
+private def exceptRuntime (x : TacticM α) : TacticM (Except MessageData α) :=
+  tryCatchRuntimeEx (Except.ok <$> x) fun e => do
+    -- Heartbeats are monotonic and survive backtracking — containing an
+    -- exhaustion would just re-time-out downstream (or let a cheap
+    -- fallback slip in under an already-blown budget). Rethrow those;
+    -- contain depth blowups + regular errors only.
+    if e.isMaxHeartbeat then throw e else pure (.error e.toMessageData)
+
 private def evalReturnedTactic
-    (tacticSeq : TSyntax ``tacticSeq) : TacticM (Except MessageData Unit) := do
-  try
-    evalTactic tacticSeq
-    return .ok ()
-  catch err =>
-    return .error err.toMessageData
+    (tacticSeq : TSyntax ``tacticSeq) : TacticM (Except MessageData Unit) :=
+  exceptRuntime (evalTactic tacticSeq)
 
 -- Emit a single, positionally-anchored Try-this suggestion for a cascade
 -- layer that just closed the goal. The message is a `logInfoAt stxRef`
@@ -434,15 +444,21 @@ private def tryInferLayer
     (layerLabel : String)
     (clearKeep : Array String)
     (emitClear : Bool) : TacticM (Except SatpFailKind Unit) := do
+  let policyInputE ← exceptRuntime collectSatpInput
   let policyInput ←
-    try collectSatpInput
-    catch e => return .error (.input e.toMessageData)
+    match policyInputE with
+    | .ok pi => pure pi
+    | .error msg => return .error (.input msg)
   match ← callInferenceService cfg policyInput userLemmas stripRetrieval hintPriority with
   | .error reason => return .error (.request reason)
   | .ok tacticString =>
       match ← parseReturnedTactic tacticString with
       | .error reason => return .error (.parse reason)
       | .ok tacticSeq =>
+          -- Audit only goals that are ours to close: goals already
+          -- assigned before the policy ran (possible in arbitrary user
+          -- tactic states) must not trip the sorryAx guard below.
+          let gs ← (← getGoals).filterM fun g => return !(← g.isAssigned)
           match ← evalReturnedTactic tacticSeq with
           | .error reason => return .error (.exec reason)
           | .ok () =>
@@ -453,6 +469,14 @@ private def tryInferLayer
               -- bodies.
               try
                 evalTactic (← `(tactic| done))
+                -- sorryAx-closure guard: errToSorry recovery (or an
+                -- emitted `sorry`) can "close" a goal with sorryAx — a
+                -- fake win that would shadow later cascade branches.
+                -- Aesop.hasSorry (not Expr.hasSorry ∘ instantiateMVars):
+                -- it also follows delayed mvar assignments.
+                for g in gs do
+                  if ← Aesop.hasSorry (mkMVar g) then
+                    return .error (.exec m!"emitted tactic closed the goal with sorryAx")
                 if traceScript then
                   emitLayerSuggestion stxRef layerLabel clearKeep emitClear tacticString
                 return .ok ()
@@ -523,16 +547,37 @@ private def runSatpCascade
   | .ok () =>
       logInfoAt stxRef s!"satp_layer=ensure_server,ms={tEnsure1 - tEnsure0},status=ok"
   let snap ← saveState
+  -- Message-log watermark (2026-08-10): term-elab failures inside the
+  -- emitted config can be LOGGED + errToSorry'd instead of thrown —
+  -- tryInferLayer then reports success while a file-level error sits in
+  -- the log (⇒ lake rc=1), and no restore ever runs on that
+  -- spurious-success path (only failure paths restore, and
+  -- `Tactic.SavedState.restore` does reset the log). So: any new
+  -- error-severity message during the policy eval ⇒ downgrade to
+  -- exec-failure and let the failure path's restore drop the messages.
+  let msgsSaved ← Core.getMessageLog
+  let errCount : MessageLog → Nat := fun l =>
+    (l.toList.filter (fun m => m.severity matches .error)).length
   let t0 ← IO.monoMsNow
-  -- Outer try/catch is defensive: tryInferLayer already classifies all
-  -- paths it owns. An exception escaping here would be a Lean-level
-  -- tactic crash outside evalReturnedTactic — extremely rare, but we
-  -- still tag it as `exec` rather than silently swallowing.
-  let result : Except SatpFailKind Unit ← try
-    tryInferLayer stxRef cfg #[] false 40 traceScript "policy" #[] false
-  catch e => pure (.error (.exec e.toMessageData))
+  -- Outer catch is defensive: tryInferLayer already classifies all
+  -- paths it owns. Runtime-inclusive (exceptRuntime) so a stray
+  -- maxRecDepth outside evalReturnedTactic still fails the layer
+  -- instead of aborting the gap.
+  let result : Except SatpFailKind Unit ←
+    match ← exceptRuntime
+      (tryInferLayer stxRef cfg #[] false 40 traceScript "policy" #[] false) with
+    | .ok inner => pure inner
+    | .error msg => pure (.error (.exec msg))
   let t1 ← IO.monoMsNow
   let elapsed := t1 - t0
+  let result : Except SatpFailKind Unit ←
+    match result with
+    | .ok () =>
+        if errCount (← Core.getMessageLog) > errCount msgsSaved then
+          pure (.error (.exec m!"emitted tactic logged error diagnostics (logged-error guard)"))
+        else
+          pure (.ok ())
+    | e => pure e
   match result with
   | .ok () =>
       logInfoAt stxRef s!"satp_layer=policy,ms={elapsed},status=ok"

@@ -16,6 +16,36 @@ set_option maxHeartbeats 0
 
 open Lean Meta LeanCopilot
 
+-- Runtime containment for the sampled search: a vLLM-sampled candidate
+-- can blow `maxRecDepth` during eval, and runtime exceptions skip every
+-- plain `try`/`first` on the way out (`Core.tryCatch` rethrows them) —
+-- aborting the whole gap and, in cascade wraps, shadowing later
+-- branches. Convert depth blowups (only) to a regular recoverable
+-- failure; heartbeats, ordinary failures, and interrupts propagate
+-- unchanged (see the handler below).
+open Elab Tactic in
+elab "containRuntime " t:tacticSeq : tactic => do
+  -- Message watermark: a nested `by` inside a sampled candidate that
+  -- blows maxRecDepth is ADMITTED via sorryAx with the error merely
+  -- LOGGED (Lean SyntheticMVars runTactic, errToSorry=true) — no
+  -- exception ever escapes for the catch below to see. A "success"
+  -- that logged new error-severity messages fails the file (rc=1)
+  -- anyway, so fail the branch and let `first`'s restore scrub them.
+  let errCount : MessageLog → Nat := fun l =>
+    (l.toList.filter (fun m => m.severity matches .error)).length
+  let msgsBefore ← Core.getMessageLog
+  match ← tryCatchRuntimeEx (Except.ok <$> evalTactic t)
+      (fun e => do
+        -- Only depth blowups are converted to a retryable failure.
+        -- Heartbeat exhaustion is monotonic across backtracking and
+        -- ordinary failures keep their identity — both rethrow.
+        if e.isMaxRecDepth then pure (Except.error e.toMessageData)
+        else throw e) with
+  | .ok _ =>
+      if errCount (← Core.getMessageLog) > errCount msgsBefore then
+        throwError "bfsaesop: emitted error diagnostics contained"
+  | .error msg => throwError "bfsaesop: runtime exception contained: {msg}"
+
 -- Default model identity = Hugging Face path of the BFS-Prover model
 -- we evaluated against. Swap this string and re-register below to point
 -- `bfsaesop` at a different vLLM-backed generator; the macro expansion
@@ -59,7 +89,8 @@ initialize registerGenerator "ByteDance-Seed/BFS-Prover-V2-7B" (.external BFS)
 -- model-agnostic.
 macro "bfsaesop" : tactic =>
   `(tactic|
-      set_option LeanCopilot.suggest_tactics.model "ByteDance-Seed/BFS-Prover-V2-7B" in
-      aesop?
-        (config := { enableSimp := false, enableUnfold := false, maxGoals := 64, bfsScore := true, terminal := true })
-        (rule_sets := [bfs, -builtin, -default]))
+      containRuntime
+        set_option LeanCopilot.suggest_tactics.model "ByteDance-Seed/BFS-Prover-V2-7B" in
+        aesop?
+          (config := { enableSimp := false, enableUnfold := false, maxGoals := 64, bfsScore := true, terminal := true })
+          (rule_sets := [bfs, -builtin, -default]))
