@@ -363,6 +363,82 @@ private def evalReturnedTactic
     (tacticSeq : TSyntax ``tacticSeq) : TacticM (Except MessageData Unit) :=
   exceptRuntime (evalTactic tacticSeq)
 
+-- Per-call heartbeat budget for the policy execution (2026-08-11).
+-- satp-policy-v4.27's card reports every number under `maxHeartbeats
+-- 200000`, one satp call per declaration — this is that regime's
+-- faithful translation to multi-gap Form A files: each `satp`/`satp?`
+-- call gets its own 200000, counted from the call's start. Outside the
+-- call the file's own setting (hb 0 in Form A headers) still governs,
+-- so the `bfsaesop` branch and everything downstream keep today's
+-- semantics.
+private def satpGapHeartbeats : Nat := 200000
+
+-- Budget scoping mirrors Core.withCurrHeartbeatsImp: one withReader
+-- that rebases the counter AND pins the limit. Deliberately NOT
+-- `set_option maxHeartbeats … in`: the live limit sits in the
+-- `Core.Context.maxHeartbeats` FIELD (options are only read at context
+-- creation), and mid-declaration option writes silently miss it — same
+-- trap as maxRecDepth (report/sbfs_leak_2026_08_10). Field units are
+-- option-value × 1000 (CoreM.getMaxHeartbeats).
+private def withGapHeartbeatsImp (x : CoreM α) : CoreM α := do
+  let heartbeats ← IO.getNumHeartbeats
+  withReader (fun ctx => { ctx with
+    initHeartbeats := heartbeats
+    maxHeartbeats := satpGapHeartbeats * 1000 }) x
+
+private def withGapHeartbeats [Monad m] [MonadControlT CoreM m] (x : m α) : m α :=
+  controlAt CoreM fun runInBase => withGapHeartbeatsImp (runInBase x)
+
+private def ambientMaxHeartbeats : CoreM Nat :=
+  return (← read).maxHeartbeats
+
+-- Like `exceptRuntime` but ALSO contains heartbeat exhaustion when
+-- `containHb` is true. Callers pass `containHb := ambient limit == 0`:
+-- the scoped burn advanced the global monotonic counter, so under a
+-- FINITE ambient limit the enclosing declaration is already (or soon)
+-- exhausted and containment would just move the rethrow to whatever
+-- runs next (fallback aesop, the next `first` branch) — old-behavior
+-- rethrow at the call site is strictly clearer there. Under ambient
+-- hb 0 (every Form A header) no re-trip is possible and containment
+-- is sound: the monotonic-exhaustion rationale in `exceptRuntime`
+-- does not apply. Interrupts still propagate (tryCatchRuntimeEx never
+-- delivers those). The Bool in the error marks hb-exhaustion so the
+-- caller can emit the audit event (see `emitHbCapEvent`).
+private def exceptRuntimeHb (containHb : Bool) (x : TacticM α) :
+    TacticM (Except (Bool × MessageData) α) :=
+  tryCatchRuntimeEx (Except.ok <$> x) fun e => do
+    if e.isMaxHeartbeat then
+      if containHb then
+        -- No count in the prefix: a nested smaller budget (e.g.
+        -- synthInstance.maxHeartbeats) raises the same exception kind,
+        -- and the real number is already in `e.toMessageData`.
+        pure (.error (true, m!"scoped heartbeat budget exhausted: {e.toMessageData}"))
+      else
+        throw e
+    else
+      pure (.error (false, e.toMessageData))
+
+-- Cap-fire audit channel (2026-08-11 codex finding): the generated
+-- `first` wrapper backtracks over a failed satp branch, and
+-- `Tactic.SavedState.restore` rewinds the message log — so
+-- `satp_layer=…,status=fail` records never survive into the Form A
+-- log when a later branch wins. IO side effects DO survive
+-- backtracking: when `SATP_HB_LOG` is set, append one line per
+-- cap-fire (O_APPEND, one short line, atomic-at-EOF on LOCAL
+-- filesystems only — O_APPEND atomicity does not hold on NFS, so
+-- point SATP_HB_LOG at local disk). Env unset → no-op. Telemetry
+-- must never break proving: all IO failures are swallowed.
+private def emitHbCapEvent (stxRef : Syntax) : TacticM Unit := do
+  match ← IO.getEnv "SATP_HB_LOG" with
+  | none => pure ()
+  | some path =>
+    try
+      let fname ← liftM (m := CoreM) (return (← read).fileName)
+      let pos := (← getFileMap).toPosition (stxRef.getPos?.getD 0)
+      liftM (m := IO) <| IO.FS.withFile path .append fun h =>
+        h.putStrLn s!"{fname}:{pos.line}:{pos.column} hb_cap_fired"
+    catch _ => pure ()
+
 -- Emit a single, positionally-anchored Try-this suggestion for a cascade
 -- layer that just closed the goal. The message is a `logInfoAt stxRef`
 -- diagnostic so the lake log carries a `file:line:col: info:` prefix
@@ -560,14 +636,25 @@ private def runSatpCascade
     (l.toList.filter (fun m => m.severity matches .error)).length
   let t0 ← IO.monoMsNow
   -- Outer catch is defensive: tryInferLayer already classifies all
-  -- paths it owns. Runtime-inclusive (exceptRuntime) so a stray
-  -- maxRecDepth outside evalReturnedTactic still fails the layer
-  -- instead of aborting the gap.
+  -- paths it owns. Runtime-inclusive AND (under ambient hb 0)
+  -- heartbeat-inclusive — there the policy execution runs under its
+  -- own rebased per-call budget (withGapHeartbeats), so exhaustion is
+  -- a branch verdict, not a file event: fail the layer, restore, and
+  -- let the outer `first` hand the gap to the next branch. Finite
+  -- ambient (e2e's default 200k, user-raised budgets): NO scope and
+  -- NO containment — the exec runs on the ambient budget and hb
+  -- rethrows, bit-identical to the pre-cap behavior. Scope and
+  -- containment share one condition so neither can drift alone.
+  let ambientMax ← ambientMaxHeartbeats
+  let policyExec : TacticM (Except SatpFailKind Unit) :=
+    tryInferLayer stxRef cfg #[] false 40 traceScript "policy" #[] false
+  let policyExec := if ambientMax == 0 then withGapHeartbeats policyExec else policyExec
   let result : Except SatpFailKind Unit ←
-    match ← exceptRuntime
-      (tryInferLayer stxRef cfg #[] false 40 traceScript "policy" #[] false) with
+    match ← exceptRuntimeHb (containHb := ambientMax == 0) policyExec with
     | .ok inner => pure inner
-    | .error msg => pure (.error (.exec msg))
+    | .error (isHb, msg) => do
+        if isHb then emitHbCapEvent stxRef
+        pure (.error (.exec msg))
   let t1 ← IO.monoMsNow
   let elapsed := t1 - t0
   let result : Except SatpFailKind Unit ←
