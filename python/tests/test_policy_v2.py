@@ -230,9 +230,6 @@ def test_revision_override_does_not_waive_verification(tmp_path, monkeypatch):
     )
 
 
-@pytest.mark.skipif(
-    not Path(DEFAULT_CHECKPOINT).exists(), reason="no checkpoint in the cache dir"
-)
 @pytest.mark.parametrize(
     "on_pin_rev,right_bytes,flag,starts,matches,waived",
     [
@@ -260,16 +257,24 @@ def test_identity_truth_table(
     matches_pin is now revision AND digest, and unverified_waived is derived
     from that rather than from whether the flag was passed, so a flag on an
     already-verified service does not force callers to opt in for nothing.
+
+    Hermetic: two small files stand in for the checkpoints and the expected
+    digest is monkeypatched to whichever one plays "the pinned bytes". The
+    first version required the real 1.07 GB artifact, which is gitignored and
+    never fetched by CI — so every row silently skipped there, and the cell
+    this table exists to protect had no protection at all.
     """
     from leansatp_runtime import hf_pin, service
 
+    pinned = tmp_path / "pinned.pt"
+    pinned.write_bytes(b"the pinned weights")
+    other = tmp_path / "other.pt"
+    other.write_bytes(b"some other weights")
+    pinned_digest = hashlib.sha256(pinned.read_bytes()).hexdigest()
+
+    monkeypatch.setattr(hf_pin, "CHECKPOINT_SHA256", pinned_digest)
     monkeypatch.setattr(hf_pin, "is_default_revision", lambda: on_pin_rev)
-    if right_bytes:
-        path = DEFAULT_CHECKPOINT
-    else:
-        p = tmp_path / "best_checkpoint.pt"
-        p.write_bytes(b"not the pinned weights")
-        path = str(p)
+    path = str(pinned if right_bytes else other)
 
     if not starts:
         with pytest.raises(RuntimeError):
