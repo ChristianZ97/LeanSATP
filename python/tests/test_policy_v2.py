@@ -152,33 +152,72 @@ def test_local_checkpoint_is_the_pinned_file():
 
 
 def test_startup_rejects_a_checkpoint_that_is_not_the_pinned_one(tmp_path, monkeypatch):
-    """``ensure_local_checkpoint`` refuses wrong weights at the default path.
+    """``ensure_local_checkpoint`` refuses wrong weights, wherever they sit.
 
-    The test above only fires when someone runs the suite. The 2026-08-12
-    incident did not involve running the suite: a Bridge auto-start picked up
-    whatever sat at the default path and served it for five minutes. So the
-    enforcement lives in the startup path, and this covers it — including the
-    branch-switch case that motivates it, since ``cache/`` is shared with
-    LeanSATP's ``main`` branch and is gitignored, so its contents outlive a
-    checkout.
+    The digest test above only fires when someone runs the suite. The
+    2026-08-12 incident did not involve running the suite: a Bridge auto-start
+    picked up whatever sat at the default path and served it for five minutes.
+    So the enforcement lives in the startup path, and this covers it —
+    including the branch-switch case that motivates it, since ``cache/`` is
+    shared with LeanSATP's ``main`` branch and is gitignored, so its contents
+    outlive a checkout.
 
-    Hermetic on purpose: a fake file, not the real superseded checkpoint,
-    which exists on one machine and would make this pass for the wrong reason
+    The relocated case is the one worth spelling out. ``SATP_CACHE_DIR`` is a
+    supported knob (both setup.sh scripts), Bridge derives
+    ``<dir>/best_checkpoint.pt`` from it, and an earlier version of this guard
+    verified only the hardcoded default path — so a relocated cache degraded to
+    a warning that auto-start throws away with the child's stderr. Identity is
+    a property of the bytes, not of where they live.
+
+    Hermetic on purpose: a fake file, not the real superseded checkpoint, which
+    exists on one machine and would make this pass for the wrong reason
     everywhere else.
     """
     from leansatp_runtime import service
 
     impostor = tmp_path / "best_checkpoint.pt"
     impostor.write_bytes(b"not the pinned weights")
-    monkeypatch.setattr(service, "DEFAULT_CHECKPOINT", str(impostor))
 
+    # (a) at the default path
+    monkeypatch.setattr(service, "DEFAULT_CHECKPOINT", str(impostor))
     with pytest.raises(RuntimeError, match="is not the best_checkpoint.pt"):
         service.ensure_local_checkpoint(str(impostor))
 
-    # The same file at a non-default path is a deliberate override: warned
-    # about, never blocked.
-    monkeypatch.setattr(service, "DEFAULT_CHECKPOINT", str(tmp_path / "other.pt"))
-    assert service.ensure_local_checkpoint(str(impostor)) == str(impostor)
+    # (b) relocated — a different path, same wrong bytes, still rejected
+    relocated = tmp_path / "elsewhere"
+    relocated.mkdir()
+    moved = relocated / "best_checkpoint.pt"
+    moved.write_bytes(b"not the pinned weights")
+    monkeypatch.setattr(service, "DEFAULT_CHECKPOINT", str(tmp_path / "unrelated.pt"))
+    with pytest.raises(RuntimeError, match="is not the best_checkpoint.pt"):
+        service.ensure_local_checkpoint(str(moved))
+
+    # (c) waived explicitly: allowed through, and /health still tells the truth
+    assert service.ensure_local_checkpoint(str(moved), allow_unverified=True) == str(
+        moved
+    )
+    assert service._LOADED_CHECKPOINT["matches_pin"] is False
+    assert service._LOADED_CHECKPOINT["checkpoint"] == str(moved)
+
+
+@pytest.mark.skipif(
+    not Path(DEFAULT_CHECKPOINT).exists(), reason="no checkpoint in the cache dir"
+)
+def test_health_fingerprint_reports_the_pinned_identity():
+    """What /health publishes after a good load.
+
+    A bare ``{"ok": true}`` cannot separate the intended fleet from a daemon
+    that outlived a pin bump, and Bridge reuses any healthy listener without
+    asking what it holds. These are the fields that make the difference
+    checkable by whoever probes the port.
+    """
+    from leansatp_runtime import service
+
+    service.ensure_local_checkpoint(DEFAULT_CHECKPOINT)
+    got = service._LOADED_CHECKPOINT
+    assert got["checkpoint_sha256"] == CHECKPOINT_SHA256
+    assert got["matches_pin"] is True
+    assert (got["repo"], got["revision"]) == (HF_REPO, REVISION)
 
 
 def test_decode_decision_off_and_bounds():

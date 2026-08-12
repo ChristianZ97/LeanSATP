@@ -38,6 +38,18 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
 DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 
+# Set once from argv; never varies per call, so it is process policy rather
+# than a parameter to thread through serve -> engine -> load_policy.
+_ALLOW_UNVERIFIED_CHECKPOINT = False
+
+# What this process actually loaded, filled in by ensure_local_checkpoint and
+# reported by /health. A liveness probe that only says {"ok": true} cannot tell
+# a correct daemon from one that outlived a pin bump — Bridge reuses any
+# healthy listener (Bridge.lean's ensureServerRunning), so on 2026-08-12 a
+# leftover daemon was indistinguishable from the intended fleet. The digest is
+# already computed at load, so publishing it costs nothing.
+_LOADED_CHECKPOINT: dict[str, object] = {}
+
 # Retrieval assets live on the same HF repo as the checkpoint, under a
 # ``premises/`` subfolder. The dense pair (embeddings + raw) is required
 # for retrieval; the BM25 index is optional. On disk we flatten to
@@ -115,30 +127,36 @@ def _normalize_local_path(path: str) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
 
-def ensure_local_checkpoint(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str:
-    """Require the pinned checkpoint to exist, and be the pinned one, before
+def ensure_local_checkpoint(
+    checkpoint_path: str = DEFAULT_CHECKPOINT, *, allow_unverified: bool = False
+) -> str:
+    """Require the checkpoint to exist, and to be the pinned one, before
     starting inference.
 
     Existence alone was the whole check until 2026-08-12, when it let a stale
-    file at the default path start a service that then served the *previous*
-    policy for five minutes without a single warning — a Bridge auto-start
-    filled the gap between killing one fleet and launching the next. Cardinality
-    guards do not catch that (every v4.27 run, and satp-policy-v2-alphaproof,
-    share one decode surface), and neither does the directory name: ``cache/``
-    is what LeanSATP's ``main`` branch uses too, it is gitignored, and its
-    contents therefore survive a branch switch in the same checkout.
+    file start a service that then served the *previous* policy for five
+    minutes without a single warning — a Bridge auto-start filled the gap
+    between killing one fleet and launching the next. Cardinality guards do not
+    catch that (every v4.27 run, and satp-policy-v2-alphaproof, share one
+    decode surface), and neither does the directory name: ``cache/`` is what
+    LeanSATP's ``main`` branch uses too, it is gitignored, and its contents
+    therefore survive a branch switch in the same checkout.
 
-    So the digest is enforced here, before ``torch.load`` sees the file. ~10 s
-    to hash 1.07 GB, once per service start (single call site, the model-load
-    path) — the cheapest thing in this function relative to loading weights.
+    Identity is checked against the *revision*, never against the path. The
+    first version of this guard only verified ``DEFAULT_CHECKPOINT`` on the
+    theory that any other path had been typed by someone who meant it — which
+    is wrong for the supported knob: ``SATP_CACHE_DIR`` relocates the cache,
+    Bridge derives ``<dir>/best_checkpoint.pt`` from it (runtimeConfigFromEnv),
+    and the intent there is still "serve the pin", just from elsewhere. Under
+    the path rule a relocated cache silently degraded to a warning that Bridge
+    auto-start discards with the child's stderr. So: hash every local
+    checkpoint, and let only an explicit ``--allow-unverified-checkpoint``
+    waive the comparison. Auto-start never passes it, so auto-start is always
+    verified.
 
-    Enforced only for the pinned artifact:
-      * the default path is what auto-start and a plain ``--serve`` use, i.e.
-        exactly where a silent substitution happens, so it must match.
-      * any other path was typed by someone who meant it (a self-trained
-        checkpoint, an era comparison) — warn, never block.
-      * an overridden ``SATP_HF_REVISION`` means we hold no digest for that
-        revision; say so instead of asserting a stale expectation.
+    ~10 s to hash 1.07 GB, once per service start (single call site, the eager
+    model-load path) — noise next to loading the weights, and it is what lets
+    /health publish a real fingerprint instead of a bare liveness bit.
     """
     if checkpoint_path.startswith("hf://"):
         raise FileNotFoundError(
@@ -161,32 +179,49 @@ def ensure_local_checkpoint(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str:
         is_default_revision,
     )
 
-    if resolved != _normalize_local_path(DEFAULT_CHECKPOINT):
+    h = hashlib.sha256()
+    with open(resolved, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    got = h.hexdigest()
+    matches_pin = got == CHECKPOINT_SHA256
+
+    # Why verification might not apply. Both are deliberate acts, and both are
+    # stated out loud rather than inferred from a path shape.
+    waived: str | None = None
+    if not is_default_revision():
+        waived = (
+            f"SATP_HF_REVISION overrides the pin ({REVISION[:8]}) and no digest "
+            "is known for that revision"
+        )
+    elif allow_unverified or _ALLOW_UNVERIFIED_CHECKPOINT:
+        waived = "--allow-unverified-checkpoint was passed"
+
+    if waived is None and not matches_pin:
+        raise RuntimeError(
+            f"{resolved} is not the best_checkpoint.pt that "
+            f"{HF_REPO}@{REVISION[:8]} serves: sha256 {got[:16]}… but the pin "
+            f"expects {CHECKPOINT_SHA256[:16]}…. Run ./setup.sh to refresh it, "
+            "or pass --allow-unverified-checkpoint if you really mean to serve "
+            "other weights."
+        )
+    if waived is not None and not matches_pin:
         log_server(
             "WARNING",
-            f"checkpoint is not the pinned default ({resolved}); its identity "
-            f"is not verified against {HF_REPO}@{REVISION[:8]}",
+            f"{resolved} is not the pinned checkpoint (sha256 {got[:16]}… vs "
+            f"{CHECKPOINT_SHA256[:16]}…); serving it anyway because {waived}",
         )
-    elif not is_default_revision():
-        log_server(
-            "WARNING",
-            f"SATP_HF_REVISION overrides the pin ({REVISION[:8]}); no digest "
-            "is known for that revision, so the checkpoint is unverified",
-        )
-    else:
-        h = hashlib.sha256()
-        with open(resolved, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 22), b""):
-                h.update(chunk)
-        got = h.hexdigest()
-        if got != CHECKPOINT_SHA256:
-            raise RuntimeError(
-                f"{resolved} is not the best_checkpoint.pt that "
-                f"{HF_REPO}@{REVISION[:8]} serves: sha256 {got[:16]}… but the "
-                f"pin expects {CHECKPOINT_SHA256[:16]}…. Run ./setup.sh to "
-                "refresh it, or pass --checkpoint explicitly if you really "
-                "mean to serve other weights."
-            )
+
+    _LOADED_CHECKPOINT.clear()
+    _LOADED_CHECKPOINT.update(
+        {
+            "checkpoint": str(resolved),
+            "checkpoint_sha256": got,
+            "matches_pin": matches_pin,
+            "repo": HF_REPO,
+            "revision": REVISION,
+        }
+    )
     return str(resolved)
 
 
@@ -972,7 +1007,12 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/health":
             self._write_json(404, {"ok": False, "error": "not found"})
             return
-        self._write_json(200, {"ok": True})
+        # Liveness plus identity. `{"ok": true}` alone cannot distinguish the
+        # intended fleet from a daemon that outlived a pin bump, and Bridge
+        # reuses any healthy listener without asking what it loaded. The model
+        # is loaded eagerly before the socket accepts, so these fields are
+        # always populated by the time this can answer.
+        self._write_json(200, {"ok": True, **_LOADED_CHECKPOINT})
 
     def do_POST(self) -> None:
         if self.path != "/infer":
@@ -1259,6 +1299,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     parser.add_argument("--checkpoint-source", default=DEFAULT_CHECKPOINT_SOURCE)
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
+    parser.add_argument(
+        "--allow-unverified-checkpoint",
+        action="store_true",
+        help=(
+            "serve a checkpoint whose SHA-256 does not match the pinned "
+            "revision (era comparisons, self-trained weights). Bridge "
+            "auto-start never passes this, so an auto-started service is "
+            "always verified."
+        ),
+    )
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--download-only", action="store_true")
     parser.add_argument(
@@ -1271,6 +1321,9 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+
+    global _ALLOW_UNVERIFIED_CHECKPOINT
+    _ALLOW_UNVERIFIED_CHECKPOINT = args.allow_unverified_checkpoint
 
     if args.download_only:
         resolved = ensure_checkpoint_download(args.checkpoint, args.checkpoint_source)
