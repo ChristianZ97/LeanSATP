@@ -233,6 +233,57 @@ def test_revision_override_does_not_waive_verification(tmp_path, monkeypatch):
 @pytest.mark.skipif(
     not Path(DEFAULT_CHECKPOINT).exists(), reason="no checkpoint in the cache dir"
 )
+@pytest.mark.parametrize(
+    "on_pin_rev,right_bytes,flag,starts,matches,waived",
+    [
+        (True, True, False, True, True, False),
+        (True, True, True, True, True, False),  # nothing to waive
+        (True, False, False, False, None, None),
+        (True, False, True, True, False, True),
+        (False, True, False, False, None, None),
+        (False, True, True, True, False, True),  # the round-6 bypass
+        (False, False, False, False, None, None),
+        (False, False, True, True, False, True),
+    ],
+)
+def test_identity_truth_table(
+    tmp_path, monkeypatch, on_pin_rev, right_bytes, flag, starts, matches, waived
+):
+    """All eight combinations of (revision, bytes, flag), not just the common one.
+
+    Each earlier test pinned down one branch, and the branch none of them
+    covered was the one that mattered: a non-default revision whose checkpoint
+    bytes happen to equal the pinned digest reported matches_pin=true, so Bridge
+    took the "verified" path and never asked the caller to consent — while that
+    revision selects a different infer.py, i.e. a different decode surface.
+
+    matches_pin is now revision AND digest, and unverified_waived is derived
+    from that rather than from whether the flag was passed, so a flag on an
+    already-verified service does not force callers to opt in for nothing.
+    """
+    from leansatp_runtime import hf_pin, service
+
+    monkeypatch.setattr(hf_pin, "is_default_revision", lambda: on_pin_rev)
+    if right_bytes:
+        path = DEFAULT_CHECKPOINT
+    else:
+        p = tmp_path / "best_checkpoint.pt"
+        p.write_bytes(b"not the pinned weights")
+        path = str(p)
+
+    if not starts:
+        with pytest.raises(RuntimeError):
+            service.ensure_local_checkpoint(path, allow_unverified=flag)
+        return
+
+    assert service.ensure_local_checkpoint(path, allow_unverified=flag) == path
+    assert service._LOADED_CHECKPOINT["matches_pin"] is matches
+    assert service._LOADED_CHECKPOINT["unverified_waived"] is waived
+
+
+@pytest.mark.skipif(
+    not Path(DEFAULT_CHECKPOINT).exists(), reason="no checkpoint in the cache dir"
+)
 def test_health_fingerprint_reports_the_pinned_identity():
     """What /health publishes after a good load.
 

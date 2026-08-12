@@ -187,7 +187,16 @@ def ensure_local_checkpoint(
         for chunk in iter(lambda: f.read(1 << 22), b""):
             h.update(chunk)
     got = h.hexdigest()
-    matches_pin = got == CHECKPOINT_SHA256
+    digest_ok = got == CHECKPOINT_SHA256
+    on_pinned_revision = is_default_revision()
+    # Both halves, or it is not a match. The digest says these are the right
+    # bytes; the revision says which pin we are even talking about, and it
+    # selects infer.py — the decode surface — as well as the weights. Comparing
+    # the digest alone let an overridden SATP_HF_REVISION report "matches the
+    # pin" on identical weights while running a different decode surface, and a
+    # caller that trusts that field would then reuse the service without ever
+    # being asked to consent.
+    verified = on_pinned_revision and digest_ok
 
     # Exactly one thing waives verification, and it is an argument someone
     # typed. An overridden SATP_HF_REVISION used to waive it too, on the
@@ -195,22 +204,17 @@ def ensure_local_checkpoint(
     # turns "I do not know" into "go ahead", and env vars are inherited: a
     # Bridge-spawned child picks up a leftover or mistyped SATP_HF_REVISION
     # from the shell that launched the parent, which made the claim "auto-start
-    # is always verified" false. Not knowing is now a hard stop; say so and
-    # make the operator opt in.
-    waived = (
-        "--allow-unverified-checkpoint was passed"
-        if (allow_unverified or _ALLOW_UNVERIFIED_CHECKPOINT)
-        else None
-    )
+    # is always verified" false. Not knowing is now a hard stop.
+    flag_given = allow_unverified or _ALLOW_UNVERIFIED_CHECKPOINT
 
-    if waived is None and not is_default_revision():
-        raise RuntimeError(
-            f"SATP_HF_REVISION pins {REVISION[:8]}, and no checkpoint digest is "
-            f"known for that revision, so {resolved} (sha256 {got[:16]}…) cannot "
-            "be verified. Unset SATP_HF_REVISION, or pass "
-            "--allow-unverified-checkpoint to serve it unverified."
-        )
-    if waived is None and not matches_pin:
+    if not verified and not flag_given:
+        if not on_pinned_revision:
+            raise RuntimeError(
+                f"SATP_HF_REVISION pins {REVISION[:8]}, and no checkpoint digest "
+                f"is known for that revision, so {resolved} (sha256 {got[:16]}…) "
+                "cannot be verified. Unset SATP_HF_REVISION, or pass "
+                "--allow-unverified-checkpoint to serve it unverified."
+            )
         raise RuntimeError(
             f"{resolved} is not the best_checkpoint.pt that "
             f"{HF_REPO}@{REVISION[:8]} serves: sha256 {got[:16]}… but the pin "
@@ -218,11 +222,16 @@ def ensure_local_checkpoint(
             "or pass --allow-unverified-checkpoint if you really mean to serve "
             "other weights."
         )
-    if waived is not None and not matches_pin:
+    if not verified:
+        why = (
+            f"revision {REVISION[:8]} is not the pinned one"
+            if not on_pinned_revision
+            else f"sha256 {got[:16]}… is not {CHECKPOINT_SHA256[:16]}…"
+        )
         log_server(
             "WARNING",
-            f"{resolved} is not the pinned checkpoint (sha256 {got[:16]}… vs "
-            f"{CHECKPOINT_SHA256[:16]}…); serving it anyway because {waived}",
+            f"{resolved} is not the pinned checkpoint ({why}); serving it "
+            "anyway because --allow-unverified-checkpoint was passed",
         )
 
     _LOADED_CHECKPOINT.clear()
@@ -230,14 +239,18 @@ def ensure_local_checkpoint(
         {
             "checkpoint": str(resolved),
             "checkpoint_sha256": got,
-            "matches_pin": matches_pin,
+            "matches_pin": verified,
             # Separate from matches_pin on purpose. "These are not the pinned
             # weights" and "somebody meant to serve them anyway" are different
             # facts, and a caller deciding whether to use this service needs
             # both: refusing every mismatch would break the era comparisons
             # --allow-unverified-checkpoint exists for, while accepting every
             # mismatch is the hole the flag was added to close.
-            "unverified_waived": waived is not None,
+            #
+            # Derived from `verified`, not from whether the flag was passed: a
+            # flag on an already-verified service waived nothing, and saying
+            # otherwise would make callers opt in for no reason.
+            "unverified_waived": not verified,
             "repo": HF_REPO,
             "revision": REVISION,
         }
