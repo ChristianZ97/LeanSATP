@@ -15,6 +15,7 @@ format directly. One aesop block per file, whole-tail replacement:
   4. any failure -> fallback: verbatim config (itself verified/axiom-clean)
 
 Outputs: minimal/<name>.lean + manifest.jsonl + summary on stdout."""
+
 import json
 import os
 import re
@@ -31,8 +32,9 @@ STD = {"propext", "Classical.choice", "Quot.sound"}
 os.makedirs(OUT, exist_ok=True)
 os.makedirs(TR, exist_ok=True)
 
-srcs = sorted(f for f in os.listdir(HERE) if re.match(r"^\d{3}_.*\.lean$", f)) or sorted(
-    f"config/{f}" for f in os.listdir(f"{HERE}/config") if f.endswith(".lean"))
+srcs = sorted(
+    f for f in os.listdir(HERE) if re.match(r"^\d{3}_.*\.lean$", f)
+) or sorted(f"config/{f}" for f in os.listdir(f"{HERE}/config") if f.endswith(".lean"))
 print(f"[distill] {len(srcs)} files", flush=True)
 
 
@@ -57,8 +59,10 @@ def parse_steps(log):
             continue
         m = re.match(r"^\s*\[\w+\]\s+(.*)$", ln)
         t = (m.group(1) if m else ln).strip()
-        if steps and (steps[-1].count("[") > steps[-1].count("]")
-                      or steps[-1].count("(") > steps[-1].count(")")):
+        if steps and (
+            steps[-1].count("[") > steps[-1].count("]")
+            or steps[-1].count("(") > steps[-1].count(")")
+        ):
             steps[-1] += " " + t
         else:
             steps.append(t)
@@ -67,8 +71,13 @@ def parse_steps(log):
 
 def lake(path, timeout=300):
     try:
-        p = subprocess.run(["lake", "env", "lean", path], cwd=LAKE,
-                           capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(
+            ["lake", "env", "lean", path],
+            cwd=LAKE,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
         return p.returncode, p.stdout + p.stderr
     except subprocess.TimeoutExpired:
         return -1, "TIMEOUT"
@@ -82,9 +91,11 @@ def one(fn):
     if not m:
         open(dst, "w").write(src)
         return {"file": fn, "name": name, "status": "no_config_block"}
-    head = src[:m.start()]
+    head = src[: m.start()]
     traced = f"{TR}/{os.path.basename(fn)}"
-    open(traced, "w").write(head + src[m.start():].replace("aesop (config", "aesop? (config", 1))
+    open(traced, "w").write(
+        head + src[m.start() :].replace("aesop (config", "aesop? (config", 1)
+    )
     rc, log = lake(traced)
     open(f"{traced}.log", "w").write(log)
     steps = parse_steps(log)
@@ -97,8 +108,14 @@ def one(fn):
         ax = {a.strip() for a in am.group(1).split(",") if a.strip()} if am else set()
         if vrc == 0 and "sorry" not in vout and am and not (ax - STD):
             open(dst, "w").write(head + body)
-            return {"file": fn, "name": name, "status": "minimal", "steps": steps,
-                    "axioms": sorted(ax), "bytes": (len(src), len(head + body))}
+            return {
+                "file": fn,
+                "name": name,
+                "status": "minimal",
+                "steps": steps,
+                "axioms": sorted(ax),
+                "bytes": (len(src), len(head + body)),
+            }
         reason = f"verify_failed(rc={vrc},axioms={sorted(ax - STD)})"
     else:
         reason = "no_steps" if rc == 0 else f"trace_failed(rc={rc})"
@@ -110,9 +127,16 @@ res = []
 with ThreadPoolExecutor(12) as ex:
     for r in ex.map(one, srcs):
         res.append(r)
-        tag = r["status"] if r["status"] != "minimal" else f"minimal({len(r['steps'])} steps)"
-        print(f"[{len(res):2d}/{len(srcs)}] {r['name']:<45} {tag}"
-              + (f"  <- {r['reason']}" if r.get("reason") else ""), flush=True)
+        tag = (
+            r["status"]
+            if r["status"] != "minimal"
+            else f"minimal({len(r['steps'])} steps)"
+        )
+        print(
+            f"[{len(res):2d}/{len(srcs)}] {r['name']:<45} {tag}"
+            + (f"  <- {r['reason']}" if r.get("reason") else ""),
+            flush=True,
+        )
 
 # manifest_run.jsonl, not manifest.jsonl: the shipped manifest is the
 # dataset-enriched view (uuid/dataset_index) and must survive re-runs.
@@ -125,10 +149,14 @@ shrunk = [r for r in res if r["status"] == "minimal"]
 tot_src = sum(r["bytes"][0] for r in shrunk)
 tot_dst = sum(r["bytes"][1] for r in shrunk)
 tac = Counter(s.split()[0].rstrip(";") for r in shrunk for s in r["steps"])
-print(f"\n[distill] minimal {n_min}/{len(res)}  "
-      f"(fallback {sum(r['status'] == 'fallback' for r in res)}, "
-      f"no_config {sum(r['status'] == 'no_config_block' for r in res)})")
+print(
+    f"\n[distill] minimal {n_min}/{len(res)}  "
+    f"(fallback {sum(r['status'] == 'fallback' for r in res)}, "
+    f"no_config {sum(r['status'] == 'no_config_block' for r in res)})"
+)
 if shrunk:
-    print(f"[distill] size on minimal subset: {tot_src} -> {tot_dst} bytes "
-          f"(-{(1 - tot_dst / tot_src) * 100:.0f}%)")
+    print(
+        f"[distill] size on minimal subset: {tot_src} -> {tot_dst} bytes "
+        f"(-{(1 - tot_dst / tot_src) * 100:.0f}%)"
+    )
 print(f"[distill] head-tactic histogram: {dict(tac.most_common())}")
