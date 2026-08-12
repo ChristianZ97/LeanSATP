@@ -193,7 +193,25 @@ private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array 
     Lean.logWarning m!"satp: bracketed hint list {names} is accepted for API back-compat but currently discarded (policy model does not ingest hints, and no aesop-rule injection is performed). See LeanSATP/README.md for migration guidance."
   pure names
 
-private def checkServerHealth (cfg : RuntimeConfig) : IO Bool := do
+/-- What a `/health` probe found on the configured port.
+
+`ok` alone is liveness, and liveness is not identity. `ensureServerRunning`
+reuses whatever answers, so on 2026-08-12 a daemon left over from the previous
+generation was indistinguishable from the intended fleet and served the
+superseded policy for five minutes. The service now reports which checkpoint it
+loaded and whether that is the one its own pin names, so the reuse decision can
+be made on identity rather than on a heartbeat.
+
+Deliberately no expected digest on this side: asking the daemon "do you match
+your pin" needs no constant here, and a second copy of the digest in Lean would
+be the very drift that made the incident possible. A daemon too old to carry
+the field cannot answer — which is itself the answer. -/
+private inductive HealthVerdict where
+  | unreachable
+  | serving
+  | wrongCheckpoint (detail : String)
+
+private def checkServerHealth (cfg : RuntimeConfig) : IO HealthVerdict := do
   let out ← IO.Process.output {
     cmd := "curl"
     args := #[
@@ -204,13 +222,26 @@ private def checkServerHealth (cfg : RuntimeConfig) : IO Bool := do
     ]
   }
   if out.exitCode != 0 then
-    return false
+    return .unreachable
   match Json.parse out.stdout with
-  | .error _ => return false
+  | .error _ => return .unreachable
   | .ok payload =>
     match payload.getObjValAs? Bool "ok" with
-    | .ok ok => return ok
-    | .error _ => return false
+    | .error _ => return .unreachable
+    | .ok false => return .unreachable
+    | .ok true =>
+      match payload.getObjValAs? Bool "matches_pin" with
+      | .error _ =>
+        return .wrongCheckpoint
+          "it predates the checkpoint fingerprint, so it cannot say what it loaded"
+      | .ok true => return .serving
+      | .ok false =>
+        let sha :=
+          match payload.getObjValAs? String "checkpoint_sha256" with
+          | .ok s => s.take 16
+          | .error _ => "unknown"
+        return .wrongCheckpoint
+          s!"it loaded {sha}…, which is not the checkpoint its pin names"
 
 private def commandExists (name : String) : IO Bool := do
   try
@@ -237,18 +268,35 @@ private def spawnService (cfg : RuntimeConfig) (runner : ServiceRunner) : IO Uni
   }
   pure ()
 
-private partial def waitForServer (cfg : RuntimeConfig) (attempts : Nat := 240) : IO Bool := do
+/-- Stops early on `wrongCheckpoint`: a service that came up holding the wrong
+weights will keep holding them, so polling it for another 60 s only delays a
+message that is already decided. -/
+private partial def waitForServer (cfg : RuntimeConfig) (attempts : Nat := 240) : IO HealthVerdict := do
   if attempts == 0 then
-    return false
-  if ← checkServerHealth cfg then
-    return true
-  IO.sleep 250
-  waitForServer cfg (attempts - 1)
+    return .unreachable
+  match ← checkServerHealth cfg with
+  | .serving => return .serving
+  | .wrongCheckpoint detail => return .wrongCheckpoint detail
+  | .unreachable =>
+    IO.sleep 250
+    waitForServer cfg (attempts - 1)
+
+private def wrongCheckpointMessage (cfg : RuntimeConfig) (detail : String) : MessageData :=
+  m!"satp: the service on {cfg.host}:{cfg.port} is not serving the pinned checkpoint — {detail}\n" ++
+  m!"  • This checkout expects: {cfg.checkpoint}\n" ++
+  m!"  • Refusing to use it rather than returning tactics from unknown weights.\n" ++
+  m!"  • Stop that process and start one from this checkout, or point\n" ++
+  m!"    SATP_SERVER_PORT at the right service."
 
 private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageData Unit) := do
-  let healthy : Bool ← liftM (m := IO) <| checkServerHealth cfg
-  if healthy then
-    return .ok ()
+  match ← liftM (m := IO) <| checkServerHealth cfg with
+  | .serving => return .ok ()
+  | .wrongCheckpoint detail =>
+    -- Do not spawn over it. The port is held, so a replacement would fail to
+    -- bind and time out below with a message about a missing checkpoint —
+    -- three plausible causes, none of them the real one.
+    return .error (wrongCheckpointMessage cfg detail)
+  | .unreachable =>
   let runner? ← liftM (m := IO) <| pickServiceRunner cfg "--serve"
   let some runner := runner?
     | return .error (pythonEnvironmentMessage cfg)
@@ -258,9 +306,10 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
     return .error (m!"satp: failed to start inference service\n" ++
       m!"  • Command: {describeRunner runner}\n" ++
       m!"  • Try running `./setup.sh` in {cfg.repoRoot}")
-  let ready : Bool ← liftM (m := IO) <| waitForServer cfg
-  if ready then
-    return .ok ()
+  match ← liftM (m := IO) <| waitForServer cfg with
+  | .serving => return .ok ()
+  | .wrongCheckpoint detail => return .error (wrongCheckpointMessage cfg detail)
+  | .unreachable =>
   return .error (
     m!"satp: inference service did not respond (timeout after 60s)\n" ++
     m!"  • Service command: {describeRunner runner}\n" ++

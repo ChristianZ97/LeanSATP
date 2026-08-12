@@ -151,8 +151,11 @@ def ensure_local_checkpoint(
     the path rule a relocated cache silently degraded to a warning that Bridge
     auto-start discards with the child's stderr. So: hash every local
     checkpoint, and let only an explicit ``--allow-unverified-checkpoint``
-    waive the comparison. Auto-start never passes it, so auto-start is always
-    verified.
+    waive the comparison. An *inherited* setting must never be able to waive
+    it, which is why an overridden ``SATP_HF_REVISION`` now fails closed rather
+    than excusing itself — env vars reach a Bridge-spawned child from whatever
+    shell started its parent, so "auto-start never passes the flag" only means
+    something once the flag is the sole waiver.
 
     ~10 s to hash 1.07 GB, once per service start (single call site, the eager
     model-load path) — noise next to loading the weights, and it is what lets
@@ -186,17 +189,27 @@ def ensure_local_checkpoint(
     got = h.hexdigest()
     matches_pin = got == CHECKPOINT_SHA256
 
-    # Why verification might not apply. Both are deliberate acts, and both are
-    # stated out loud rather than inferred from a path shape.
-    waived: str | None = None
-    if not is_default_revision():
-        waived = (
-            f"SATP_HF_REVISION overrides the pin ({REVISION[:8]}) and no digest "
-            "is known for that revision"
-        )
-    elif allow_unverified or _ALLOW_UNVERIFIED_CHECKPOINT:
-        waived = "--allow-unverified-checkpoint was passed"
+    # Exactly one thing waives verification, and it is an argument someone
+    # typed. An overridden SATP_HF_REVISION used to waive it too, on the
+    # reasoning that we hold no digest for an arbitrary revision — but that
+    # turns "I do not know" into "go ahead", and env vars are inherited: a
+    # Bridge-spawned child picks up a leftover or mistyped SATP_HF_REVISION
+    # from the shell that launched the parent, which made the claim "auto-start
+    # is always verified" false. Not knowing is now a hard stop; say so and
+    # make the operator opt in.
+    waived = (
+        "--allow-unverified-checkpoint was passed"
+        if (allow_unverified or _ALLOW_UNVERIFIED_CHECKPOINT)
+        else None
+    )
 
+    if waived is None and not is_default_revision():
+        raise RuntimeError(
+            f"SATP_HF_REVISION pins {REVISION[:8]}, and no checkpoint digest is "
+            f"known for that revision, so {resolved} (sha256 {got[:16]}…) cannot "
+            "be verified. Unset SATP_HF_REVISION, or pass "
+            "--allow-unverified-checkpoint to serve it unverified."
+        )
     if waived is None and not matches_pin:
         raise RuntimeError(
             f"{resolved} is not the best_checkpoint.pt that "

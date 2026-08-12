@@ -200,6 +200,32 @@ def test_startup_rejects_a_checkpoint_that_is_not_the_pinned_one(tmp_path, monke
     assert service._LOADED_CHECKPOINT["checkpoint"] == str(moved)
 
 
+def test_revision_override_does_not_waive_verification(tmp_path, monkeypatch):
+    """An inherited env var must not be able to switch the guard off.
+
+    ``SATP_HF_REVISION`` used to waive the digest comparison on its own, on the
+    reasoning that no digest is known for an arbitrary revision. That turns "I
+    cannot check" into "no need to check", and it is inherited: a Bridge-spawned
+    child picks the variable up from whatever shell started its parent, so a
+    leftover or mistyped value silently disabled the guard on the auto-start
+    path — the one path this whole guard exists for. Not knowing is a stop.
+    """
+    from leansatp_runtime import hf_pin, service
+
+    impostor = tmp_path / "best_checkpoint.pt"
+    impostor.write_bytes(b"not the pinned weights")
+    monkeypatch.setattr(service, "DEFAULT_CHECKPOINT", str(impostor))
+    monkeypatch.setattr(hf_pin, "is_default_revision", lambda: False)
+
+    with pytest.raises(RuntimeError, match="no checkpoint digest is known"):
+        service.ensure_local_checkpoint(str(impostor))
+
+    # Only the explicit argument gets through.
+    assert service.ensure_local_checkpoint(str(impostor), allow_unverified=True) == str(
+        impostor
+    )
+
+
 @pytest.mark.skipif(
     not Path(DEFAULT_CHECKPOINT).exists(), reason="no checkpoint in the cache dir"
 )
