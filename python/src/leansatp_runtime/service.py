@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import errno
+import hashlib
 import io
 import json
 import os
@@ -25,11 +26,16 @@ _DEFAULT_INFER_CACHE_SIZE = 10000
 _SEMAPHORE_ACQUIRE_TIMEOUT = 45.0  # must stay below Bridge.lean's curl timeout
 DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/satp-policy-v4.27/best_checkpoint.pt"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
-# Era-tagged on purpose: the cache holds the era's weights next to its
-# retrieval assets, and the two eras' decode constants are incompatible
-# (see hf_pin.py). A shared directory would let a stale
-# ``best_checkpoint.pt`` become the default checkpoint after a pin bump.
-DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache_v427")
+# One directory per checkout, named for nothing: this branch serves exactly the
+# checkpoint ``hf_pin.py`` pins, so an era or run tag in the path buys nothing
+# and actively misleads. It used to read ``cache_v427``, and 2026-08-12 showed
+# why that is worse than a plain name — the pin moved *within* the era
+# (best_checkpoint.pt: 867372b6… -> 1c03fdd5…) while the directory kept its
+# v4.27 tag, so a stale file sat at the default path looking correct and
+# ``ensure_local_checkpoint`` (existence-only) started it without complaint.
+# The guard that actually works is ``test_policy_v2.py``'s SHA-256 assertion
+# against HF's own ``lfs.sha256`` for the pinned revision, not the folder name.
+DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
 DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 
 # Retrieval assets live on the same HF repo as the checkpoint, under a
@@ -110,7 +116,30 @@ def _normalize_local_path(path: str) -> Path:
 
 
 def ensure_local_checkpoint(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str:
-    """Require a local checkpoint file to exist before starting inference."""
+    """Require the pinned checkpoint to exist, and be the pinned one, before
+    starting inference.
+
+    Existence alone was the whole check until 2026-08-12, when it let a stale
+    file at the default path start a service that then served the *previous*
+    policy for five minutes without a single warning — a Bridge auto-start
+    filled the gap between killing one fleet and launching the next. Cardinality
+    guards do not catch that (every v4.27 run, and satp-policy-v2-alphaproof,
+    share one decode surface), and neither does the directory name: ``cache/``
+    is what LeanSATP's ``main`` branch uses too, it is gitignored, and its
+    contents therefore survive a branch switch in the same checkout.
+
+    So the digest is enforced here, before ``torch.load`` sees the file. ~10 s
+    to hash 1.07 GB, once per service start (single call site, the model-load
+    path) — the cheapest thing in this function relative to loading weights.
+
+    Enforced only for the pinned artifact:
+      * the default path is what auto-start and a plain ``--serve`` use, i.e.
+        exactly where a silent substitution happens, so it must match.
+      * any other path was typed by someone who meant it (a self-trained
+        checkpoint, an era comparison) — warn, never block.
+      * an overridden ``SATP_HF_REVISION`` means we hold no digest for that
+        revision; say so instead of asserting a stale expectation.
+    """
     if checkpoint_path.startswith("hf://"):
         raise FileNotFoundError(
             "checkpoint path must be a local file, not an hf:// URI; "
@@ -124,6 +153,40 @@ def ensure_local_checkpoint(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str:
         )
     if not resolved.is_file():
         raise FileNotFoundError(f"checkpoint path is not a file: {resolved}")
+
+    from leansatp_runtime.hf_pin import (
+        CHECKPOINT_SHA256,
+        HF_REPO,
+        REVISION,
+        is_default_revision,
+    )
+
+    if resolved != _normalize_local_path(DEFAULT_CHECKPOINT):
+        log_server(
+            "WARNING",
+            f"checkpoint is not the pinned default ({resolved}); its identity "
+            f"is not verified against {HF_REPO}@{REVISION[:8]}",
+        )
+    elif not is_default_revision():
+        log_server(
+            "WARNING",
+            f"SATP_HF_REVISION overrides the pin ({REVISION[:8]}); no digest "
+            "is known for that revision, so the checkpoint is unverified",
+        )
+    else:
+        h = hashlib.sha256()
+        with open(resolved, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 22), b""):
+                h.update(chunk)
+        got = h.hexdigest()
+        if got != CHECKPOINT_SHA256:
+            raise RuntimeError(
+                f"{resolved} is not the best_checkpoint.pt that "
+                f"{HF_REPO}@{REVISION[:8]} serves: sha256 {got[:16]}… but the "
+                f"pin expects {CHECKPOINT_SHA256[:16]}…. Run ./setup.sh to "
+                "refresh it, or pass --checkpoint explicitly if you really "
+                "mean to serve other weights."
+            )
     return str(resolved)
 
 

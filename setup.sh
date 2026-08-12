@@ -42,12 +42,14 @@ LEANCOPILOT_TAG="v4.27.0"
 MATHLIB_URL="https://github.com/leanprover-community/mathlib4.git"
 MATHLIB_COMMIT="a3a10db0e9d66acbebf76c5e6a135066525ac900"
 
-# Default checkpoint = the published v4.27 policy (2026-08-06). Keep this in
-# step with hf_pin.py / service.py's DEFAULT_CHECKPOINT_SOURCE — the three must
-# name the same era or the service loads weights its decode constants can't
-# read (build_policy_v2 refuses rather than mis-rendering).
+# Default checkpoint = the published v4.27 policy. Keep this in step with
+# hf_pin.py / service.py's DEFAULT_CHECKPOINT_SOURCE — the three must name the
+# same era or the service loads weights its decode constants can't read
+# (build_policy_v2 refuses rather than mis-rendering). The revision inside
+# hf_pin.py is what selects the file; this line only names the repo, so the two
+# cannot drift apart the way a tagged cache directory did (see service.py).
 SATP_CKPT_SOURCE="${SATP_CKPT_SOURCE:-hf://ChristianZ97/satp-policy-v4.27/best_checkpoint.pt}"
-SATP_CACHE_DIR="${SATP_CACHE_DIR:-$ROOT/cache_v427}"
+SATP_CACHE_DIR="${SATP_CACHE_DIR:-$ROOT/cache}"
 
 log() { printf '\n\033[1m[LeanSATP setup] %s\033[0m\n' "$*"; }
 die() { printf '\033[31m[LeanSATP setup] ERROR: %s\033[0m\n' "$*" >&2; exit 1; }

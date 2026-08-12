@@ -42,7 +42,7 @@ private def defaultRepoRoot : IO FilePath := do
   Lean.realPathNormalized (← packageRoot)
 
 private def defaultCacheDir : IO String := do
-  return (((← defaultRepoRoot) / "cache_v427").normalize.toString)
+  return (((← defaultRepoRoot) / "cache").normalize.toString)
 
 private def defaultCheckpointFromCacheDir (cacheDir : String) : String :=
   ((FilePath.mk cacheDir) / "best_checkpoint.pt").normalize.toString

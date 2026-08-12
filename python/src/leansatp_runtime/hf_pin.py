@@ -47,6 +47,14 @@ import sys
 HF_REPO = "ChristianZ97/satp-policy-v4.27"
 _DEFAULT_REVISION = "8ed997e1526e58106a960966b06721dbf313c6a4"
 
+# ``lfs.sha256`` that HfApi().repo_info(HF_REPO, revision=_DEFAULT_REVISION,
+# files_metadata=True) reports for best_checkpoint.pt. Lives beside the
+# revision because it is the same fact: a revision names weights, and this is
+# how you check you have them. Keeping it here rather than in the test is not
+# tidiness — on 2026-08-12 the revision was bumped and the test's own copy of
+# the digest was not, so the guard went on approving the superseded file.
+CHECKPOINT_SHA256 = "1c03fdd59943318e439f942e0f1d03f7a428ab54cd8ea6f16ac8d71a0e80f262"
+
 REVISION = os.environ.get("SATP_HF_REVISION", _DEFAULT_REVISION).strip()
 if not REVISION:
     raise RuntimeError(
@@ -54,6 +62,17 @@ if not REVISION:
         "floating revision; set a commit hash, or unset the variable to use "
         "the pinned default"
     )
+
+
+def is_default_revision() -> bool:
+    """Whether ``REVISION`` is still the pin, not an ``SATP_HF_REVISION`` override.
+
+    ``CHECKPOINT_SHA256`` is the digest *of the pinned revision*, so any code
+    enforcing it has to know whether the revision in play is that one. An
+    override is a legitimate thing to do (bisecting a bad bump, checking an
+    older artifact); it just means nothing here can vouch for what lands.
+    """
+    return REVISION == _DEFAULT_REVISION
 
 
 def revision_for(repo_id: str) -> str | None:

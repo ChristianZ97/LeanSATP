@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from leansatp_runtime.core import Premise
-from leansatp_runtime.hf_pin import HF_REPO, REVISION
+from leansatp_runtime.hf_pin import CHECKPOINT_SHA256, HF_REPO, REVISION
 from leansatp_runtime.models.policy_v2 import (
     LEMMA_HOST_POOL,
     LEMMA_K,
@@ -93,13 +93,18 @@ def test_local_checkpoint_is_the_pinned_file():
     half-finished bump — pin moved, cache dir still holding the previous
     run's weights — stays green.
 
-    The anchor is HF's own record, not anything derived from training: the
-    digest below is the `lfs.sha256` that
+    The anchor is HF's own record, not anything derived from training:
+    `CHECKPOINT_SHA256` is the `lfs.sha256` that
     `HfApi().repo_info(HF_REPO, revision=REVISION, files_metadata=True)`
-    reports for best_checkpoint.pt, confirmed equal to this file on
-    2026-08-06. Deliberately not the checkpoint's `wandb_run_id`: W&B runs
-    get deleted, so that field can stop meaning anything while the weights
-    stay valid.
+    reports for best_checkpoint.pt. Deliberately not the checkpoint's
+    `wandb_run_id`: W&B runs get deleted, so that field can stop meaning
+    anything while the weights stay valid.
+
+    Imported, never copied here. A local literal is how this guard failed on
+    2026-08-12: the revision was bumped one line away and this copy of the
+    digest stayed on the superseded file, so the test kept approving exactly
+    the skew it exists to catch. One definition, in hf_pin.py, next to the
+    revision it describes.
 
     Cost: ~10 s to hash 1.07 GB. It only runs where the checkpoint already
     exists, and it is the one check standing between a pin bump and a
@@ -109,9 +114,7 @@ def test_local_checkpoint_is_the_pinned_file():
     with open(DEFAULT_CHECKPOINT, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 22), b""):
             h.update(chunk)
-    assert h.hexdigest() == (
-        "867372b6ef698da376973b5de933e962c1582924a0b89592f7ada827063fa85a"
-    ), (
+    assert h.hexdigest() == CHECKPOINT_SHA256, (
         f"{DEFAULT_CHECKPOINT} is not the best_checkpoint.pt that "
         f"{HF_REPO}@{REVISION[:8]} serves (got {h.hexdigest()[:16]}…)"
     )
@@ -146,6 +149,36 @@ def test_local_checkpoint_is_the_pinned_file():
             f"constants from {_INFER.__file__} — checkpoint and pin are "
             "different eras"
         )
+
+
+def test_startup_rejects_a_checkpoint_that_is_not_the_pinned_one(tmp_path, monkeypatch):
+    """``ensure_local_checkpoint`` refuses wrong weights at the default path.
+
+    The test above only fires when someone runs the suite. The 2026-08-12
+    incident did not involve running the suite: a Bridge auto-start picked up
+    whatever sat at the default path and served it for five minutes. So the
+    enforcement lives in the startup path, and this covers it — including the
+    branch-switch case that motivates it, since ``cache/`` is shared with
+    LeanSATP's ``main`` branch and is gitignored, so its contents outlive a
+    checkout.
+
+    Hermetic on purpose: a fake file, not the real superseded checkpoint,
+    which exists on one machine and would make this pass for the wrong reason
+    everywhere else.
+    """
+    from leansatp_runtime import service
+
+    impostor = tmp_path / "best_checkpoint.pt"
+    impostor.write_bytes(b"not the pinned weights")
+    monkeypatch.setattr(service, "DEFAULT_CHECKPOINT", str(impostor))
+
+    with pytest.raises(RuntimeError, match="is not the best_checkpoint.pt"):
+        service.ensure_local_checkpoint(str(impostor))
+
+    # The same file at a non-default path is a deliberate override: warned
+    # about, never blocked.
+    monkeypatch.setattr(service, "DEFAULT_CHECKPOINT", str(tmp_path / "other.pt"))
+    assert service.ensure_local_checkpoint(str(impostor)) == str(impostor)
 
 
 def test_decode_decision_off_and_bounds():

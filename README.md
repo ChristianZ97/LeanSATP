@@ -52,8 +52,15 @@ Tactic-level, as defined by `reproduce.py` in the pinned HF repo, verified by
 
 | checkpoint | miniF2F-test | source of the count |
 |---|---|---|
-| `best_checkpoint.pt` (= `ckpt_3ep_val103_test101.pt`) — the default at this pin | **101/244** | upstream card at `8ed997e1` |
+| `best_checkpoint.pt` (= `ckpt_3ep_val103_test101.pt`) — the default at this pin | **101/244** (test-selected, post-hoc) | upstream card at `8ed997e1` |
 | `ckpt_10ep_val104_test99.pt` — the default at the previous pin `5a4d2f1b` | 99/244 | reproduced here against `lake` |
+
+Read the first row with its caveat: that checkpoint was picked for being the
+best of the 3-epoch grid *on miniF2F-test*, and 101/244 is then measured on the
+same split — a post-selection number, not a held-out one, so it is not
+comparable to a validation-selected checkpoint's test score. The second row is
+validation-selected (val 104) and its 99/244 is held out. Any downstream
+comparison should say which of the two it used.
 
 The previous revision also shipped a second seed (`ckpt_1827.pt`, 97/244, also
 reproduced here); upstream removed the seed-named files when it flattened the
@@ -109,10 +116,13 @@ cd LeanSATP
 
 `./setup.sh` builds the bundled Lean environment under `deps/`, wires the local
 LeanCopilot/CTranslate2 paths into Lake, and downloads the pinned v4.27 SATP
-assets into `cache_v427/`. No shell export is needed for normal Lean use.
-The era lives in the directory name on purpose — `cache_v2/` holds the v2
-policy and its 20-host pool, and pointing the service at the wrong one is
-refused rather than silently served.
+assets into `cache/`. No shell export is needed for normal Lean use. One
+checkout serves exactly one pinned checkpoint, so the directory carries no era
+or run tag: what guards identity is `hf_pin.py`'s revision plus the SHA-256
+assertion in `python/tests/test_policy_v2.py`, which compares the local file
+against HF's own `lfs.sha256` for that revision. A tagged directory name looks
+like a guard and is not one — a pin that moves *within* an era leaves a stale
+file sitting at a still-correct-looking path.
 
 ## Start The Service
 
@@ -120,8 +130,8 @@ Manual startup is recommended before the first `satp` call:
 
 ```bash
 uv run -m leansatp_runtime.service --serve \
-  --checkpoint cache_v427/best_checkpoint.pt \
-  --cache-dir cache_v427/ \
+  --checkpoint cache/best_checkpoint.pt \
+  --cache-dir cache/ \
   --host 127.0.0.1 \
   --port 5177
 ```
