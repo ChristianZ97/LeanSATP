@@ -14,7 +14,7 @@ LeanSATP repository root so Lake uses this repo's toolchain and bundled deps.
 | `main` | SATP v1 (paper) | miniF2F (paper) | Lean `v4.17.0-rc1` + DSP-Plus Mathlib fork (see `main` README) |
 | `v2` | [`ChristianZ97/satp-policy-v2`](https://huggingface.co/ChristianZ97/satp-policy-v2) `449f192d` | [`ChristianZ97/minif2f-satp`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp) `32ed7f63` | standalone `v4.26.0` (below) |
 | `alphaproof` | [`ChristianZ97/satp-policy-v2-alphaproof`](https://huggingface.co/ChristianZ97/satp-policy-v2-alphaproof) `a654c92d` | [`ChristianZ97/minif2f-satp-alphaproof`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp-alphaproof) `81a8abfa` | standalone `v4.26.0` (below) |
-| `v4.27` (this branch) | [`ChristianZ97/satp-policy-v4.27`](https://huggingface.co/ChristianZ97/satp-policy-v4.27) `5a4d2f1b` | [`ChristianZ97/minif2f-satp-v4.27`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp-v4.27) `94424f13` | standalone `v4.27.0` |
+| `v4.27` (this branch) | [`ChristianZ97/satp-policy-v4.27`](https://huggingface.co/ChristianZ97/satp-policy-v4.27) `8ed997e1` | [`ChristianZ97/minif2f-satp-v4.27`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp-v4.27) `94424f13` | standalone `v4.27.0` |
 
 This branch's environment (`v4.27`):
 
@@ -29,9 +29,11 @@ This branch's environment (`v4.27`):
   The model-card numbers for this policy were produced at dataset snapshot
   `94424f13` of `ChristianZ97/minif2f-satp-v4.27`.
 - Verification: `lake` builds in this environment are the ground truth. The
-  v4.27 model card's 13 numbers were reproduced against `lake` on 2026-08-06
-  (both seed checkpoints, five ablation rows each, plus three policy-free
-  baselines), and every counted proof passed a `#print axioms` audit.
+  model card's 13 numbers *at revision `5a4d2f1b`* were reproduced against
+  `lake` on 2026-08-06 (both seed checkpoints, five ablation rows each, plus
+  three policy-free baselines), and every counted proof passed a
+  `#print axioms` audit. The card at the current pin re-measures that ladder on
+  its new default checkpoint; those counts are upstream's, not re-measured here.
 - A proof counts only with zero `sorry` and a clean `#print axioms` audit
   (no `sorryAx`). The audit is not optional: an `aesop` rule naming an
   unknown lemma can close any goal with a synthetic `sorry` that compiles
@@ -48,10 +50,14 @@ and a 20-entry lemma-host pool. See those branches' own READMEs.
 Tactic-level, as defined by `reproduce.py` in the pinned HF repo, verified by
 `lake` with a `#print axioms` audit on every counted proof:
 
-| checkpoint | miniF2F-test |
-|---|---|
-| `best_checkpoint.pt` (= `ckpt_8964.pt`, the default) | **99/244** |
-| `ckpt_1827.pt` | 97/244 |
+| checkpoint | miniF2F-test | source of the count |
+|---|---|---|
+| `best_checkpoint.pt` (= `ckpt_3ep_val103_test101.pt`) — the default at this pin | **101/244** | upstream card at `8ed997e1` |
+| `ckpt_10ep_val104_test99.pt` — the default at the previous pin `5a4d2f1b` | 99/244 | reproduced here against `lake` |
+
+The previous revision also shipped a second seed (`ckpt_1827.pt`, 97/244, also
+reproduced here); upstream removed the seed-named files when it flattened the
+checkpoint names, so that file no longer exists at this pin.
 
 Full-pipeline (draft → sketch → prove) numbers for this era are not in yet;
 the `bfsaesop` baseline on the same 244 is 178 / 181 / 178 (n=3, mean 179.0).

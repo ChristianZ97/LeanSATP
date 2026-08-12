@@ -58,7 +58,7 @@ def test_pin_is_the_v427_era():
     """
     assert (HF_REPO, REVISION) == (
         "ChristianZ97/satp-policy-v4.27",
-        "5a4d2f1bd6731dd5b68ad95264094284206e609f",
+        "8ed997e1526e58106a960966b06721dbf313c6a4",
     ), "hf_pin.py no longer names the v4.27 artifact set this suite was written for"
     assert (
         len(LEMMA_HOST_POOL),

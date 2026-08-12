@@ -24,6 +24,19 @@ in ``policy_v2.py``), the 181-vs-172 head width still raises inside
 Cardinality does not *identify* an era, though: ``satp-policy-v2-alphaproof``
 is also 19/172, so it passes every check here. The pin, not the guard, is
 what selects a training run.
+
+2026-08-12, 5a4d2f1b → 8ed997e1: same era, same executable bundle. ``infer.py``
+and both retrieval assets (``cache/mathlib4_premises.txt``,
+``cache/premise_embeddings.npy``) are byte-identical across the two revisions —
+sha256 compared at each — so the decode surface, and the Step-A parity gate that
+targets it, are unchanged. What moves is *which file* ``best_checkpoint.pt`` is:
+upstream flattened the checkpoint names and re-pointed the default from the
+10-epoch validation-best (``ckpt_10ep_val104_test99.pt``, sha256 ``867372b6…``)
+to the 3-epoch test-best (``ckpt_3ep_val103_test101.pt``, sha256 ``1c03fdd5…``).
+That new default is the checkpoint already in service and the one every v4.27
+band number was produced with, so this bump makes the pin agree with the runs
+rather than changing them. The seed-named files the old revision shipped
+(``ckpt_8964.pt``, ``ckpt_1827.pt``) no longer exist upstream.
 """
 
 from __future__ import annotations
@@ -32,7 +45,7 @@ import os
 import sys
 
 HF_REPO = "ChristianZ97/satp-policy-v4.27"
-_DEFAULT_REVISION = "5a4d2f1bd6731dd5b68ad95264094284206e609f"
+_DEFAULT_REVISION = "8ed997e1526e58106a960966b06721dbf313c6a4"
 
 REVISION = os.environ.get("SATP_HF_REVISION", _DEFAULT_REVISION).strip()
 if not REVISION:
