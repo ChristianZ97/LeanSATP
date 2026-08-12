@@ -198,6 +198,10 @@ def test_startup_rejects_a_checkpoint_that_is_not_the_pinned_one(tmp_path, monke
     )
     assert service._LOADED_CHECKPOINT["matches_pin"] is False
     assert service._LOADED_CHECKPOINT["checkpoint"] == str(moved)
+    # Reported separately from matches_pin: Bridge refuses an unexplained
+    # mismatch but accepts a waived one when the caller also opts in, so
+    # "wrong" and "wrong on purpose" have to be distinguishable over HTTP.
+    assert service._LOADED_CHECKPOINT["unverified_waived"] is True
 
 
 def test_revision_override_does_not_waive_verification(tmp_path, monkeypatch):

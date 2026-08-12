@@ -240,6 +240,24 @@ private def checkServerHealth (cfg : RuntimeConfig) : IO HealthVerdict := do
           match payload.getObjValAs? String "checkpoint_sha256" with
           | .ok s => s.take 16
           | .error _ => "unknown"
+        -- A mismatch the operator asked for is a supported configuration —
+        -- era comparisons and self-trained weights are why
+        -- `--allow-unverified-checkpoint` exists, and refusing those outright
+        -- would make the flag serve `/infer` while `satp` silently fell back to
+        -- plain aesop. Consent has to be given on both sides, though: the
+        -- service says it was waived, and this caller has to say it wants a
+        -- waived one. Neither alone is enough, so a waived daemon left running
+        -- cannot be picked up by an ordinary run.
+        let waived :=
+          match payload.getObjValAs? Bool "unverified_waived" with
+          | .ok b => b
+          | .error _ => false
+        let callerOptedIn := (← IO.getEnv "SATP_ALLOW_UNVERIFIED_SERVICE").isSome
+        if waived && callerOptedIn then
+          return .serving
+        if waived then
+          return .wrongCheckpoint
+            s!"it loaded {sha}…, started with --allow-unverified-checkpoint; set SATP_ALLOW_UNVERIFIED_SERVICE to use it"
         return .wrongCheckpoint
           s!"it loaded {sha}…, which is not the checkpoint its pin names"
 

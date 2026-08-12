@@ -231,6 +231,13 @@ def ensure_local_checkpoint(
             "checkpoint": str(resolved),
             "checkpoint_sha256": got,
             "matches_pin": matches_pin,
+            # Separate from matches_pin on purpose. "These are not the pinned
+            # weights" and "somebody meant to serve them anyway" are different
+            # facts, and a caller deciding whether to use this service needs
+            # both: refusing every mismatch would break the era comparisons
+            # --allow-unverified-checkpoint exists for, while accepting every
+            # mismatch is the hole the flag was added to close.
+            "unverified_waived": waived is not None,
             "repo": HF_REPO,
             "revision": REVISION,
         }
