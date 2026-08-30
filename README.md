@@ -1,5 +1,7 @@
 # LeanSATP
 
+> This branch preserves LeanSATP as used in the paper (v1). Current development and the latest release live on [`main`](https://github.com/ChristianZ97/LeanSATP/tree/main).
+
 LeanSATP is the Lean 4 package implementing **SATP** (*Steering Aesop for Theorem Proving*) — a framework for learning `aesop` configuration, formulated as a contextual multi-armed bandit and supervised directly by `aesop`'s deterministic execution and Lean 4's verification. The `satp` tactic queries a local inference service for a goal-tailored `aesop` configuration and runs it, falling back to plain `aesop` if the service is unavailable; `satp?` additionally prints the executed tactic as a "Try this" suggestion and throws on failure instead of falling back. The service only generates the configuration — Lean executes and checks it as usual.
 
 On MiniF2F-Test, `satp` achieves a solve rate of 32.6% ± 0.3%, against 10.7% for plain `aesop`; see the paper for details.
@@ -14,7 +16,7 @@ LeanSATP builds with Lean `v4.17.0-rc1`. Mathlib (together with Aesop and LeanCo
    [[require]]
    name = "LeanSATP"
    git = "https://github.com/ChristianZ97/LeanSATP.git"
-   rev = "main"
+   rev = "legacy"
    ```
 
 2. Install [`uv`](https://docs.astral.sh/uv/):
