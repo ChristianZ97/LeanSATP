@@ -1,0 +1,86 @@
+commit 289926bd1e2e793a3a8631994711a45aa5c4ad7f
+Author: Chenrui <v-chenruicao@microsoft.com>
+Date:   Wed May 14 09:25:20 2025 +0000
+
+    init for bfs score
+
+diff --git a/Aesop/Options/Public.lean b/Aesop/Options/Public.lean
+index f2243e7..e114d2e 100644
+--- a/Aesop/Options/Public.lean
++++ b/Aesop/Options/Public.lean
+@@ -156,6 +156,12 @@ structure Options where
+   Enable the builtin `unfold` normalisation rule.
+   -/
+   enableUnfold := true
++
++  /--
++  Use length-normalized scoring heuristic of BFS-Prover.
++  -/
++  bfsScore := false
++
+   deriving Inhabited, BEq, Repr
+ 
+ /--
+diff --git a/Aesop/Percent.lean b/Aesop/Percent.lean
+index 0e3a873..2b97710 100644
+--- a/Aesop/Percent.lean
++++ b/Aesop/Percent.lean
+@@ -21,6 +21,9 @@ namespace Percent
+ protected def ofFloat (f : Float) : Option Percent :=
+   if 0 <= f && f <= 1.0 then some ⟨f⟩ else none
+ 
++protected def ofFloat' (f : Float) : Percent :=
++  ⟨f⟩
++
+ instance : Mul Percent where
+   mul p q := ⟨p.toFloat * q.toFloat⟩
+ 
+@@ -54,6 +57,9 @@ instance : ToString Percent where
+ instance : HPow Percent Nat Percent where
+   hPow | ⟨p⟩, n => ⟨p ^ n.toFloat⟩
+ 
++def zero : Percent :=
++  ⟨0⟩
++
+ def hundred : Percent :=
+   ⟨1⟩
+ 
+diff --git a/Aesop/RuleTac/Tactic.lean b/Aesop/RuleTac/Tactic.lean
+index c8fb374..86c052e 100644
+--- a/Aesop/RuleTac/Tactic.lean
++++ b/Aesop/RuleTac/Tactic.lean
+@@ -81,7 +81,7 @@ unsafe def tacGenImpl (decl : Name) : RuleTac := λ input => do
+     initialState.restore
+     let env ← getEnv
+     try
+-      let some successProbability := Percent.ofFloat successProbability
++      let some successProbability := some (Percent.ofFloat' successProbability)
+         | throwError "invalid success probability '{successProbability}', must be between 0 and 1"
+       let .ok stx :=
+         Parser.runParserCategory env `tactic tacticStr (fileName := "<stdin>")
+diff --git a/Aesop/Search/Expansion.lean b/Aesop/Search/Expansion.lean
+index 7b28ff9..48c9408 100644
+--- a/Aesop/Search/Expansion.lean
++++ b/Aesop/Search/Expansion.lean
+@@ -70,9 +70,19 @@ def addRapps (parentRef : GoalRef) (rule : RegularRule)
+   let mut subgoals := Array.mkEmpty $ rapps.size * 3
+   for h : i in [:rapps.size] do
+     let rapp := rapps[i]
++    let options := (← read).options
++    let bfsScore := options.bfsScore
++    -- Lean.logInfo m!"Success probability: {rapp.successProbability?.getD rule.successProbability}, rule.successProbability: {rule.successProbability}, rule: {rule.name}, parent.depth: {parent.depth}"
+     let successProbability :=
+-      parent.successProbability *
+-      (rapp.successProbability?.getD rule.successProbability)
++      if bfsScore then
++        if parent.depth == 0 then
++          parent.successProbability * (rapp.successProbability?.getD rule.successProbability)
++        else if parent.depth == 1 then
++          Percent.ofFloat' (((rapp.successProbability?.getD rule.successProbability).toFloat * (1 / Float.pow (Float.ofNat parent.depth) 0.5)))
++        else
++          Percent.ofFloat' (((parent.successProbability.toFloat * (Float.pow (Float.ofNat parent.depth - 1) 0.5) + (rapp.successProbability?.getD rule.successProbability).toFloat) * (1 / Float.pow (Float.ofNat parent.depth) 0.5)))
++      else
++        parent.successProbability * (rapp.successProbability?.getD rule.successProbability)
+     let rref ← addRapp {
+       rapp with
+       parent := parentRef

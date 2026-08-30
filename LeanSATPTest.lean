@@ -26,10 +26,17 @@ example (a b : Nat) : a + b = b + a := by
 example (a b : Nat) (h : a = b) : a + 1 = b + 1 := by
   satp?
 
--- `satp` used inside `have`: the collected formal statement has the
--- outer binders but the have's target becomes the goal.
+-- `satp` used inside `have`: the collected goal state includes the
+-- outer binders while the have's target becomes the goal.
 example (n : Nat) (hn : n > 0) : n * 2 ≥ 2 := by
   have h1 : n ≥ 1 := by satp
+  linarith
+
+-- Mid-proof `satp?` (no aesop fallback): the policy itself must close a
+-- `have` goal rendered via the standard printer — catches policy-input
+-- regressions that bare `satp`'s fallback would mask.
+example (n : Nat) (hn : n > 0) : n * 2 ≥ 2 := by
+  have h1 : n ≥ 1 := by satp?
   linarith
 
 -- Chained `have`s all become binders of the next satp invocation.

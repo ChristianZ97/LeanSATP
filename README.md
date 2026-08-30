@@ -1,39 +1,40 @@
 # LeanSATP
 
-LeanSATP is the Lean 4 package implementing **SATP** (*Steering Aesop for Theorem Proving*) — a framework for learning `aesop` configuration, formulated as a contextual multi-armed bandit and supervised directly by `aesop`'s deterministic execution and Lean 4's verification. The `satp` tactic queries a local inference service for a goal-tailored `aesop` configuration and runs it, falling back to plain `aesop` if the service is unavailable; `satp?` additionally prints the executed tactic as a "Try this" suggestion and throws on failure instead of falling back. The service only generates the configuration — Lean executes and checks it as usual.
+LeanSATP is the Lean 4 package implementing **SATP** (*Steering Aesop for Theorem Proving*) — a framework for learning `aesop` configuration, formulated as a contextual multi-armed bandit and supervised directly by `aesop`'s deterministic execution and Lean 4's verification. The `satp` tactic queries a local inference service for a goal-tailored `aesop` configuration and runs it, falling back to plain `aesop` if the service is unavailable; `satp?` additionally prints the executed tactic as a "Try this" suggestion and throws on failure instead of falling back. The service only proposes the configuration — Lean executes and checks everything as usual.
 
-On MiniF2F-Test, `satp` achieves a solve rate of 32.6% ± 0.3%, against 10.7% for plain `aesop`; see the paper for details.
+This branch is a standalone Lean `v4.27.0` environment. Run Lean from the repository root so Lake uses this repo's toolchain and bundled deps.
 
-LeanSATP builds with Lean `v4.17.0-rc1`. Mathlib (together with Aesop and LeanCopilot) is pulled transitively from the commit-pinned [DSP-Plus Mathlib fork](https://github.com/caochenrui/mathlib4/tree/dsp+), so the whole dependency tree is reproducible.
+## Branches
 
-## Adding LeanSATP to Your Project
+| branch | policy checkpoint (HF, pinned) | eval dataset (HF, pinned) | Lean environment |
+|---|---|---|---|
+| `main` (this branch) | [`ChristianZ97/satp-policy-v4.27`](https://huggingface.co/ChristianZ97/satp-policy-v4.27) `8ed997e1` | [`ChristianZ97/minif2f-satp-v4.27`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp-v4.27) `94424f13` | standalone `v4.27.0` (below) |
+| `v2` | [`ChristianZ97/satp-policy-v2`](https://huggingface.co/ChristianZ97/satp-policy-v2) `449f192d` | [`ChristianZ97/minif2f-satp`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp) `32ed7f63` | standalone `v4.26.0` (see the `v2` README) |
+| `legacy` | [`ChristianZ97/satp-policy-goal`](https://huggingface.co/ChristianZ97/satp-policy-goal) (paper, v1) | miniF2F (paper) | Lean `v4.17.0-rc1` + DSP-Plus Mathlib fork (see the `legacy` README) |
 
-1. Use Lean `v4.17.0-rc1` (`lean-toolchain` must contain `leanprover/lean4:v4.17.0-rc1`) and add LeanSATP to your `lakefile.toml`:
+The `main` and `v2` branches pin their checkpoint, dataset, and Lean dependency tree, so those eras stay reproducible end to end; `legacy` predates the pinning setup and tracks the latest revision of its checkpoint repo. Evaluation is defined by `reproduce.py` in the pinned policy repo, and detailed numbers with their caveats live on the model cards. A proof counts only with zero `sorry` and a clean `#print axioms` audit (no `sorryAx`).
 
-   ```toml
-   [[require]]
-   name = "LeanSATP"
-   git = "https://github.com/ChristianZ97/LeanSATP.git"
-   rev = "main"
-   ```
+Machine-checked proofs from the full draft → sketch → prove pipeline (MiniF2F, ProofNet#, PutnamBench) are published in [`ChristianZ97/LeanSATP-Eval`](https://github.com/ChristianZ97/LeanSATP-Eval); every proof there compiles standalone on stock Mathlib.
 
-2. Install [`uv`](https://docs.astral.sh/uv/):
+## Environment
 
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+- Lean toolchain `leanprover/lean4:v4.27.0` (`lean-toolchain`); Lake uses the bundled deps under `deps/` (no remote Mathlib cache).
+- Pinned deps: mathlib4 `a3a10db0e9` (stock, zero Mathlib changes), aesop `cb837cc` (+ local `bfsScore` rule set), LeanCopilot `v4.27.0` (no fork). All four are stamped in `deps/.pins`; `./setup.sh` wipes and rebuilds when the stamp does not match.
+- The checkpoint and its inference code (`infer.py` — model, greedy decode, tactic-string rendering) are downloaded at the pinned HF revision; `python/src/leansatp_runtime/hf_pin.py` is the single pin, and this repo hosts no second copy of the inference code.
 
-3. From the LeanSATP package root (`.lake/packages/LeanSATP` when used as a dependency), run:
+## Setup
 
-   ```bash
-   ./setup.sh
-   ```
+```bash
+git clone https://github.com/ChristianZ97/LeanSATP.git
+cd LeanSATP
+./setup.sh
+```
 
-   This installs the Python dependencies, fetches the Lean dependencies, and downloads the model checkpoint from [`ChristianZ97/satp-policy-goal`](https://huggingface.co/ChristianZ97/satp-policy-goal) into `cache/`.
+`./setup.sh` builds the bundled Lean environment under `deps/`, wires the local LeanCopilot/CTranslate2 paths into Lake, and downloads the pinned SATP assets into `cache/`. No shell export is needed for normal Lean use.
 
-## Usage
+## Start the Service
 
-Start the inference service (recommended before first use — the checkpoint takes a few seconds to load):
+Manual startup is recommended before the first `satp` call:
 
 ```bash
 uv run -m leansatp_runtime.service --serve \
@@ -43,14 +44,26 @@ uv run -m leansatp_runtime.service --serve \
   --port 5177
 ```
 
-Then:
+`satp` can auto-start the service, but manual startup avoids first-use cold-start timeouts.
+
+`satp` sends the current Lean goal state to the policy; Lean elaborates theorem declarations before the tactic runs, so the policy always sees a tactic state.
+
+## Example
+
+Create `Demo.lean`:
 
 ```lean
 import Mathlib
 import LeanSATP
 
-example : True := by
+example (n : Nat) : n = n := by
   satp
 ```
 
-If no server is running, `satp` launches one in the background automatically; on any failure it logs a warning and falls back to plain `aesop`.
+Run it from the LeanSATP root:
+
+```bash
+lake env lean Demo.lean
+```
+
+Use `satp?` instead of `satp` when evaluating: it prints the exact generated tactic as a "Try this" suggestion and fails instead of falling back to plain `aesop`.

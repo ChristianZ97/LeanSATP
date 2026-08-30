@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import errno
+import hashlib
 import io
 import json
 import os
@@ -23,10 +24,31 @@ from typing import Any, Optional
 _DEFAULT_MAX_INFLIGHT = 8
 _DEFAULT_INFER_CACHE_SIZE = 10000
 _SEMAPHORE_ACQUIRE_TIMEOUT = 45.0  # must stay below Bridge.lean's curl timeout
-DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/satp-policy-goal/best_checkpoint.pt"
+DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/satp-policy-v4.27/best_checkpoint.pt"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+# One directory per checkout, named for nothing: this branch serves exactly the
+# checkpoint ``hf_pin.py`` pins, so an era or run tag in the path buys nothing
+# and actively misleads. It used to read ``cache_v427``, and 2026-08-12 showed
+# why that is worse than a plain name — the pin moved *within* the era
+# (best_checkpoint.pt: 867372b6… -> 1c03fdd5…) while the directory kept its
+# v4.27 tag, so a stale file sat at the default path looking correct and
+# ``ensure_local_checkpoint`` (existence-only) started it without complaint.
+# The guard that actually works is ``test_policy_v2.py``'s SHA-256 assertion
+# against HF's own ``lfs.sha256`` for the pinned revision, not the folder name.
 DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
 DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
+
+# Set once from argv; never varies per call, so it is process policy rather
+# than a parameter to thread through serve -> engine -> load_policy.
+_ALLOW_UNVERIFIED_CHECKPOINT = False
+
+# What this process actually loaded, filled in by ensure_local_checkpoint and
+# reported by /health. A liveness probe that only says {"ok": true} cannot tell
+# a correct daemon from one that outlived a pin bump — Bridge reuses any
+# healthy listener (Bridge.lean's ensureServerRunning), so on 2026-08-12 a
+# leftover daemon was indistinguishable from the intended fleet. The digest is
+# already computed at load, so publishing it costs nothing.
+_LOADED_CHECKPOINT: dict[str, object] = {}
 
 # Retrieval assets live on the same HF repo as the checkpoint, under a
 # ``premises/`` subfolder. The dense pair (embeddings + raw) is required
@@ -34,9 +56,12 @@ DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 # ``cache_dir/<basename>`` so ``policy.py``'s ``load_premise_embeddings``
 # (which reads ``cache_dir/premise_embeddings.npy`` etc.) finds them.
 DEFAULT_RETRIEVAL_FILES = (
-    "premises/premise_embeddings.npy",
+    "premises/premise_embeddings.npy",  # v1 (satp-policy-goal) layout
     "premises/premises_raw.npy",
     "premises/bm25_index.pkl",
+    "cache/premise_embeddings.npy",  # v2 / v4.27 layout; absent names skip silently
+    "cache/mathlib4_premises.txt",
+    # names flatten to basenames — don't point two ckpt generations at one cache dir
 )
 
 _torch = None
@@ -102,8 +127,40 @@ def _normalize_local_path(path: str) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
 
-def ensure_local_checkpoint(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str:
-    """Require a local checkpoint file to exist before starting inference."""
+def ensure_local_checkpoint(
+    checkpoint_path: str = DEFAULT_CHECKPOINT, *, allow_unverified: bool = False
+) -> str:
+    """Require the checkpoint to exist, and to be the pinned one, before
+    starting inference.
+
+    Existence alone was the whole check until 2026-08-12, when it let a stale
+    file start a service that then served the *previous* policy for five
+    minutes without a single warning — a Bridge auto-start filled the gap
+    between killing one fleet and launching the next. Cardinality guards do not
+    catch that (every v4.27 run, and satp-policy-v2-alphaproof, share one
+    decode surface), and neither does the directory name: ``cache/`` is what
+    LeanSATP's ``main`` branch uses too, it is gitignored, and its contents
+    therefore survive a branch switch in the same checkout.
+
+    Identity is checked against the *revision*, never against the path. The
+    first version of this guard only verified ``DEFAULT_CHECKPOINT`` on the
+    theory that any other path had been typed by someone who meant it — which
+    is wrong for the supported knob: ``SATP_CACHE_DIR`` relocates the cache,
+    Bridge derives ``<dir>/best_checkpoint.pt`` from it (runtimeConfigFromEnv),
+    and the intent there is still "serve the pin", just from elsewhere. Under
+    the path rule a relocated cache silently degraded to a warning that Bridge
+    auto-start discards with the child's stderr. So: hash every local
+    checkpoint, and let only an explicit ``--allow-unverified-checkpoint``
+    waive the comparison. An *inherited* setting must never be able to waive
+    it, which is why an overridden ``SATP_HF_REVISION`` now fails closed rather
+    than excusing itself — env vars reach a Bridge-spawned child from whatever
+    shell started its parent, so "auto-start never passes the flag" only means
+    something once the flag is the sole waiver.
+
+    ~10 s to hash 1.07 GB, once per service start (single call site, the eager
+    model-load path) — noise next to loading the weights, and it is what lets
+    /health publish a real fingerprint instead of a bare liveness bit.
+    """
     if checkpoint_path.startswith("hf://"):
         raise FileNotFoundError(
             "checkpoint path must be a local file, not an hf:// URI; "
@@ -117,6 +174,87 @@ def ensure_local_checkpoint(checkpoint_path: str = DEFAULT_CHECKPOINT) -> str:
         )
     if not resolved.is_file():
         raise FileNotFoundError(f"checkpoint path is not a file: {resolved}")
+
+    from leansatp_runtime.hf_pin import (
+        CHECKPOINT_SHA256,
+        HF_REPO,
+        REVISION,
+        is_default_revision,
+    )
+
+    h = hashlib.sha256()
+    with open(resolved, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    got = h.hexdigest()
+    digest_ok = got == CHECKPOINT_SHA256
+    on_pinned_revision = is_default_revision()
+    # Both halves, or it is not a match. The digest says these are the right
+    # bytes; the revision says which pin we are even talking about, and it
+    # selects infer.py — the decode surface — as well as the weights. Comparing
+    # the digest alone let an overridden SATP_HF_REVISION report "matches the
+    # pin" on identical weights while running a different decode surface, and a
+    # caller that trusts that field would then reuse the service without ever
+    # being asked to consent.
+    verified = on_pinned_revision and digest_ok
+
+    # Exactly one thing waives verification, and it is an argument someone
+    # typed. An overridden SATP_HF_REVISION used to waive it too, on the
+    # reasoning that we hold no digest for an arbitrary revision — but that
+    # turns "I do not know" into "go ahead", and env vars are inherited: a
+    # Bridge-spawned child picks up a leftover or mistyped SATP_HF_REVISION
+    # from the shell that launched the parent, which made the claim "auto-start
+    # is always verified" false. Not knowing is now a hard stop.
+    flag_given = allow_unverified or _ALLOW_UNVERIFIED_CHECKPOINT
+
+    if not verified and not flag_given:
+        if not on_pinned_revision:
+            raise RuntimeError(
+                f"SATP_HF_REVISION pins {REVISION[:8]}, and no checkpoint digest "
+                f"is known for that revision, so {resolved} (sha256 {got[:16]}…) "
+                "cannot be verified. Unset SATP_HF_REVISION, or pass "
+                "--allow-unverified-checkpoint to serve it unverified."
+            )
+        raise RuntimeError(
+            f"{resolved} is not the best_checkpoint.pt that "
+            f"{HF_REPO}@{REVISION[:8]} serves: sha256 {got[:16]}… but the pin "
+            f"expects {CHECKPOINT_SHA256[:16]}…. Run ./setup.sh to refresh it, "
+            "or pass --allow-unverified-checkpoint if you really mean to serve "
+            "other weights."
+        )
+    if not verified:
+        why = (
+            f"revision {REVISION[:8]} is not the pinned one"
+            if not on_pinned_revision
+            else f"sha256 {got[:16]}… is not {CHECKPOINT_SHA256[:16]}…"
+        )
+        log_server(
+            "WARNING",
+            f"{resolved} is not the pinned checkpoint ({why}); serving it "
+            "anyway because --allow-unverified-checkpoint was passed",
+        )
+
+    _LOADED_CHECKPOINT.clear()
+    _LOADED_CHECKPOINT.update(
+        {
+            "checkpoint": str(resolved),
+            "checkpoint_sha256": got,
+            "matches_pin": verified,
+            # Separate from matches_pin on purpose. "These are not the pinned
+            # weights" and "somebody meant to serve them anyway" are different
+            # facts, and a caller deciding whether to use this service needs
+            # both: refusing every mismatch would break the era comparisons
+            # --allow-unverified-checkpoint exists for, while accepting every
+            # mismatch is the hole the flag was added to close.
+            #
+            # Derived from `verified`, not from whether the flag was passed: a
+            # flag on an already-verified service waived nothing, and saying
+            # otherwise would make callers opt in for no reason.
+            "unverified_waived": not verified,
+            "repo": HF_REPO,
+            "revision": REVISION,
+        }
+    )
     return str(resolved)
 
 
@@ -131,9 +269,24 @@ def ensure_checkpoint_download(
     if checkpoint_source.startswith("hf://"):
         from huggingface_hub import hf_hub_download
 
+        from leansatp_runtime.hf_pin import revision_for
+
         repo_id, filename = _parse_hf_checkpoint_source(checkpoint_source)
+        # Resolved *outside* the suppression block on purpose: it warns when
+        # repo_id is unpinned, and _suppress_startup_noise redirects both
+        # stdout and stderr — inside, the one call site that fetches the
+        # actual weights would be the only silent one.
+        revision = revision_for(repo_id)
         with _suppress_startup_noise():
-            downloaded = Path(hf_hub_download(repo_id=repo_id, filename=filename))
+            downloaded = Path(
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    # pin the whole bundle (source + weights + assets) to one
+                    # immutable revision — see hf_pin.py
+                    revision=revision,
+                )
+            )
     else:
         downloaded = _normalize_local_path(checkpoint_source)
         if not downloaded.exists() or not downloaded.is_file():
@@ -162,7 +315,10 @@ def ensure_retrieval_download(
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
 
+    from leansatp_runtime.hf_pin import revision_for
+
     repo_id, _ = _parse_hf_checkpoint_source(checkpoint_source)
+    revision = revision_for(repo_id)
     destination_dir = Path(cache_dir).expanduser().resolve(strict=False)
     destination_dir.mkdir(parents=True, exist_ok=True)
 
@@ -174,7 +330,11 @@ def ensure_retrieval_download(
         target = destination_dir / Path(filename).name
         try:
             with _suppress_startup_noise():
-                source_path = Path(hf_hub_download(repo_id=repo_id, filename=filename))
+                source_path = Path(
+                    hf_hub_download(
+                        repo_id=repo_id, filename=filename, revision=revision
+                    )
+                )
         except (EntryNotFoundError, HfHubHTTPError):
             continue
         if source_path.resolve() != target.resolve():
@@ -343,6 +503,33 @@ def _validate_checkpoint_shape(state_dict) -> None:
         )
 
 
+# T5 feed-forward sub-layer linears live at `…DenseReluDense.{wi_0,wi_1,wo}`.
+# Training regimes through 2026-05 LoRA-wrapped them alongside attention; the
+# `only_DPO_RL` regime folded the wrapped FF weights back into plain Linears
+# before upload. The runtime auto-detects which format is on disk so both
+# layouts load without an explicit config flag.
+_FF_LORA_NAMES = ("wi_0", "wi_1", "wo")
+
+
+def _detect_lora_targets(state_dict) -> tuple[str, ...]:
+    """Return LoRA target_modules that reproduce the checkpoint's wrapper layout.
+
+    Default (attention-only) matches current training. When FF sub-layers ship
+    LoRA-decomposed keys (older checkpoints), extend targets to include
+    ``wi_0/wi_1/wo`` so module construction recreates the same wrapper
+    hierarchy and ``load_state_dict`` finds every key.
+    """
+    targets = list(_LoRAConfig().target_modules)
+    has_ff_lora = any(
+        f".DenseReluDense.{name}.lora_A" in key
+        for key in state_dict
+        for name in _FF_LORA_NAMES
+    )
+    if has_ff_lora:
+        targets.extend(_FF_LORA_NAMES)
+    return tuple(targets)
+
+
 def _validate_state_dict_load(incompatible_keys) -> None:
     """Reject a state_dict load that is not a perfect parameter-name match."""
     missing = list(incompatible_keys.missing_keys)
@@ -363,14 +550,49 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
     checkpoint_path = ensure_local_checkpoint(checkpoint_path)
     device = device or preferred_device()
 
+    # weights_only=False: the ckpt embeds numpy objects; acceptable because
+    # every hf:// artifact is pinned to one immutable revision (hf_pin.py)
     ckpt = _torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
+
+    # v2 ckpts carry tactic_heads.tactic_emb, v1 tactic_heads.safe_group.*;
+    # route on the fingerprint (same spirit as the FF-LoRA auto-detect below).
+    if "tactic_heads.tactic_emb" in state_dict:
+        from leansatp_runtime.models import policy_v2 as _pv2
+
+        log_server(
+            "INFO",
+            "[LeanSATP] v2 checkpoint detected (factored joint-action heads); "
+            "using policy_v2 runtime",
+        )
+        with _suppress_startup_noise():
+            model = _pv2.build_policy_v2(ckpt, cache_dir, device=device)
+        try:
+            model.load_premise_embeddings()
+            retrieval_enabled = True
+        except FileNotFoundError as exc:
+            retrieval_enabled = False
+            log_server(
+                "INFO",
+                f"[LeanSATP] Retrieval disabled: {exc}",
+            )
+        model.to(device)
+        model.eval()
+        return model, device, retrieval_enabled
+
     _validate_checkpoint_shape(state_dict)
+
+    lora_targets = _detect_lora_targets(state_dict)
+    if set(lora_targets) != set(_LoRAConfig().target_modules):
+        log_server(
+            "INFO",
+            f"[LeanSATP] checkpoint LoRA targets: {lora_targets} (legacy FF-LoRA detected)",
+        )
 
     with _suppress_startup_noise():
         model = _AesopPolicy(
             use_lora=True,
-            lora_config=_LoRAConfig(),
+            lora_config=_LoRAConfig(target_modules=lora_targets),
             device=device,
             cache_dir=cache_dir,
         )
@@ -395,6 +617,10 @@ def render_full_proof(formal_statement: str, tactic: str) -> str:
     return formal_statement.rstrip() + "\n" + textwrap.indent(tactic.rstrip(), "  ")
 
 
+def _trace_label(policy_input: str) -> str:
+    return "Policy input" if "⊢" in policy_input else "Full proof"
+
+
 def _indent_block(block: str, prefix: str = "    ") -> str:
     """Indent a multi-line block for human-readable stderr traces."""
     cleaned = block.rstrip() or "<empty>"
@@ -408,9 +634,10 @@ def render_full_proof_trace(
     device: str,
 ) -> str:
     """Render the generated proof as a plain-text stderr block."""
+    label = _trace_label(formal_statement)
     return "\n".join(
         [
-            f"[LeanSATP] Full proof ({device}):",
+            f"[LeanSATP] {label} ({device}):",
             _indent_block(render_full_proof(formal_statement, tactic)),
         ]
     )
@@ -432,9 +659,10 @@ def print_full_proof_trace(
     _ensure_rich()
     if enable_color and _RichConsole and _RichSyntax:
         console = _make_console(stream)
+        label = _trace_label(formal_statement)
         log_server(
             "INFO",
-            f"[bold magenta][LeanSATP] Full proof[/bold magenta] "
+            f"[bold magenta][LeanSATP] {label}[/bold magenta] "
             f"([bold yellow]{device}[/bold yellow]):",
             stream=stream,
             enable_color=True,
@@ -472,7 +700,7 @@ def render_try_me_message(host: str, port: int) -> str:
         "curl --request POST \\\n"
         f"  --url http://{curl_host}:{port}/infer \\\n"
         "  --header 'Content-Type: application/json' \\\n"
-        '  --data \'{"formal_statement":"theorem t : True := by"}\' | jq\n',
+        '  --data \'{"formal_statement":"⊢ True"}\' | jq\n',
         "  ",
     )
 
@@ -545,11 +773,30 @@ def policy_tactic(
     tactic_name: str = "aesop",
     user_lemmas: Optional[list[str]] = None,
     user_lemma_priority: Optional[int] = None,
+    strip_retrieval: bool = False,
 ) -> str:
-    """Generate a LeanSATP tactic by greedy policy inference."""
+    """Greedy policy inference. ``strip_retrieval`` only acts here for v2
+    (decode-time); the v1 path ignores it and keeps the caller-side text strip."""
     _ensure_imports()
 
     model, device, retrieval_enabled = model_and_device
+
+    if getattr(model, "arch", "v1") == "v2":
+        from leansatp_runtime.models import policy_v2 as _pv2
+
+        tactic = _pv2.policy_tactic_v2(
+            model,
+            device,
+            formal_statement,
+            retrieval_enabled=retrieval_enabled,
+            tactic_name=tactic_name,
+            strip_retrieval=strip_retrieval,
+        )
+        kwargs: dict = {}
+        if user_lemma_priority is not None:
+            kwargs["priority_pct"] = user_lemma_priority
+        return append_user_lemmas(tactic, user_lemmas, **kwargs)
+
     top_k_premises = None
     lemma_scores = None
     lemma_embs = None
@@ -698,7 +945,7 @@ class SATPInferenceEngine:
         # Run the policy WITHOUT appending user lemmas; user_lemma append
         # and retrieval strip are handled below so the order is explicit:
         #   policy output  →  (optional) strip retrieval rules  →  append hints
-        policy_kwargs = dict(tactic_name=tactic_name)
+        policy_kwargs = dict(tactic_name=tactic_name, strip_retrieval=strip_retrieval)
         with self._lock:
             try:
                 tactic = policy_tactic(
@@ -793,7 +1040,12 @@ class _SATPRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/health":
             self._write_json(404, {"ok": False, "error": "not found"})
             return
-        self._write_json(200, {"ok": True})
+        # Liveness plus identity. `{"ok": true}` alone cannot distinguish the
+        # intended fleet from a daemon that outlived a pin bump, and Bridge
+        # reuses any healthy listener without asking what it loaded. The model
+        # is loaded eagerly before the socket accepts, so these fields are
+        # always populated by the time this can answer.
+        self._write_json(200, {"ok": True, **_LOADED_CHECKPOINT})
 
     def do_POST(self) -> None:
         if self.path != "/infer":
@@ -1080,6 +1332,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     parser.add_argument("--checkpoint-source", default=DEFAULT_CHECKPOINT_SOURCE)
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
+    parser.add_argument(
+        "--allow-unverified-checkpoint",
+        action="store_true",
+        help=(
+            "serve a checkpoint whose SHA-256 does not match the pinned "
+            "revision (era comparisons, self-trained weights). Bridge "
+            "auto-start never passes this, so an auto-started service is "
+            "always verified."
+        ),
+    )
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--download-only", action="store_true")
     parser.add_argument(
@@ -1093,6 +1355,9 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
 
+    global _ALLOW_UNVERIFIED_CHECKPOINT
+    _ALLOW_UNVERIFIED_CHECKPOINT = args.allow_unverified_checkpoint
+
     if args.download_only:
         resolved = ensure_checkpoint_download(args.checkpoint, args.checkpoint_source)
         retrieval_paths: list[str] = []
@@ -1100,6 +1365,14 @@ def main() -> int:
             retrieval_paths = ensure_retrieval_download(
                 args.cache_dir, args.checkpoint_source
             )
+        # prefetch + validate the pinned inference source so a later offline
+        # service start never has to contact HF (importing runs the download);
+        # only for the v2 repo — v1/custom sources never touch the v2 pin
+        from leansatp_runtime.hf_pin import HF_REPO as _pin_repo
+
+        if args.checkpoint_source.startswith(f"hf://{_pin_repo}/"):
+            from leansatp_runtime.models import policy_v2 as _pv2  # noqa: F401
+
         print(
             json.dumps(
                 {

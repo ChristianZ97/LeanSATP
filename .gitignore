@@ -3,6 +3,8 @@ lake-manifest.json
 .venv/
 cache/
 cache_goal/
+cache_v2/
+cache_v427/
 SATP-Training/
 python/.ruff_cache/
 python/.mypy_cache/
@@ -11,3 +13,6 @@ python/src/*.egg-info/
 uv.lock
 **/__pycache__/
 .DS_Store
+deps/
+deps/_lc_build.log
+cache_v427_3ep101/

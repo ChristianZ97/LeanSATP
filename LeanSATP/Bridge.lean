@@ -1,6 +1,5 @@
 import Aesop
 import Lean
-import Mathlib.Tactic.ClearExcept
 
 open Lean Parser Elab Tactic Meta
 open System (FilePath)
@@ -149,74 +148,32 @@ private def parseAsTacticSeq (env : Environment) (input : String) (fileName := "
   | .error err => .error err
 
 /--
-Iterate the filtered local context used by both input renderers. Keeps
-non-anonymous, non-implementation, non-inst-implicit, non-`let` hypotheses
-and zeta-reduces their types so Python reconstruction doesn't trip on
-let-bindings (e.g. `let b := n / 6` turning into an `optParam` binder).
--/
-private def collectFilteredHyps : TacticM (Array (Lean.Name × Lean.Format)) :=
-  withMainContext do
-    let mut acc : Array (Lean.Name × Lean.Format) := #[]
-    for decl in ← getLCtx do
-      if decl.userName.isAnonymous
-          || decl.isImplementationDetail
-          || decl.binderInfo.isInstImplicit
-          || decl.isLet then
-        continue
-      let renderedType ← ppExpr (← zetaReduce decl.type)
-      acc := acc.push (decl.userName, renderedType)
-    return acc
-
-/--
-Render the current tactic state as a theorem statement close to SATP's
-original (2025) training distribution.
--/
-private def collectFormalStatement : TacticM String := withMainContext do
-  let hyps ← collectFilteredHyps
-  let binderLines := hyps.map fun (n, t) => s!"  ({n} : {t.pretty})"
-  let renderedGoal ← ppExpr (← zetaReduce (← getMainTarget))
-  let lines := #["theorem _satpGoal"] ++ binderLines ++ #[s!"  : {renderedGoal.pretty} := by"]
-  return "\n".intercalate lines.toList
-
-/--
-Render the current tactic state as a raw goal state (Lean's `⊢` format),
-matching the pretrain distribution and the input modality used by
-BFS-Prover / ReProver / LeanCopilot. One hypothesis per line, goal
-prefixed with `⊢`.
+Render the current tactic state with Lean's standard goal printer
+(`Meta.ppGoal`) — the same rendering that produced the policy's
+training / eval `goal_state` inputs (same-type binders merged into one
+line: `b h v : ℝ`). The byt5 policy is byte-sensitive, so any rendering
+drift shifts decodes: the previous hand-rolled one-hypothesis-per-line
+renderer perturbed the policy input on essentially every problem.
+2026-07-10 probe: under `ppGoal`, 182/208 parseable minif2f-test
+statements render byte-equal to the dataset `goal_state`; the remaining
+26 are stale-era pretty-print artifacts no current printer reproduces.
 -/
 private def collectGoalState : TacticM String := withMainContext do
-  let hyps ← collectFilteredHyps
-  let hypLines := hyps.map fun (n, t) => s!"{n} : {t.pretty}"
-  let renderedGoal ← ppExpr (← zetaReduce (← getMainTarget))
-  let lines := hypLines ++ #[s!"⊢ {renderedGoal.pretty}"]
-  return "\n".intercalate lines.toList
+  return (← ppGoal (← getMainGoal)).pretty
 
 /--
-Pick the input renderer based on `SATP_INPUT_MODE` env var (read once per
-call; cost is negligible vs the HTTP round-trip).
-  • `theorem` (default, 2026-04-21) → `collectFormalStatement` — original
-    2025 SATP finetune format. A/B on minif2f-test showed
-    theorem-level 103/244 vs goal-state 97/244 (overlap 95,
-    goal-only 2, theorem-only 8), so theorem stays the default.
-  • `goal` → `collectGoalState` — aligns with pretrain + peer tacGens
-    (BFS-Prover/ReProver/LeanCopilot).  Kept as opt-in for future
-    gap-level finetune experiments where the model is retrained on
-    bare goal-state inputs.
+The satp policy is trained and reproduced with goal-state policy inputs.
+Theorem-shaped proofs are elaborated by Lean first; the policy always
+sees the resulting tactic state.
 
-Retrying the alternate mode before failing is intentionally
-NOT implemented: the retry would double HTTP latency for every failed
-policy call, and per-call `satp_input_mode=...` telemetry already gives
-downstream analysis the signal to compute per-mode pass rate post-hoc.
-If a future ablation needs it, wire a second `tryInferLayer` call with
-the alternate mode between `snap.restore` and the trailing `throwError`
-in `runSatpCascade`.
+Retrying the alternate input mode before failing is intentionally
+not implemented: the retry would double HTTP latency for every failed
+policy call. If a future ablation needs it, wire a second `tryInferLayer`
+call between `snap.restore` and the trailing `throwError` in
+`runSatpCascade`.
 -/
-private def collectSatpInput : TacticM String := do
-  let mode := (← IO.getEnv "SATP_INPUT_MODE").getD "theorem"
-  if mode == "theorem" then
-    collectFormalStatement
-  else
-    collectGoalState
+private def collectSatpInput : TacticM String :=
+  collectGoalState
 
 private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array String) := do
   let mut names := #[]
@@ -226,8 +183,8 @@ private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array 
       names := names.push id.getId.toString
     | _ =>
       throwError "satp only supports identifier lemmas in [ ... ], got: {term}"
-  -- Surface the discard so callers
-  -- don't silently rely on hint threading that no longer reaches the
+  -- Surface the discard so callers don't
+  -- silently rely on hint threading that no longer reaches the
   -- model or aesop rules. Compile-time warning is visible in IDE/CI
   -- without hard-erroring on existing call sites (pipeline wrappers
   -- were already switched to bare `satp?` in build_stages.py +
@@ -236,7 +193,25 @@ private def elabUserLemmaNames (terms : Array (TSyntax `term)) : TacticM (Array 
     Lean.logWarning m!"satp: bracketed hint list {names} is accepted for API back-compat but currently discarded (policy model does not ingest hints, and no aesop-rule injection is performed). See LeanSATP/README.md for migration guidance."
   pure names
 
-private def checkServerHealth (cfg : RuntimeConfig) : IO Bool := do
+/-- What a `/health` probe found on the configured port.
+
+`ok` alone is liveness, and liveness is not identity. `ensureServerRunning`
+reuses whatever answers, so on 2026-08-12 a daemon left over from the previous
+generation was indistinguishable from the intended fleet and served the
+superseded policy for five minutes. The service now reports which checkpoint it
+loaded and whether that is the one its own pin names, so the reuse decision can
+be made on identity rather than on a heartbeat.
+
+Deliberately no expected digest on this side: asking the daemon "do you match
+your pin" needs no constant here, and a second copy of the digest in Lean would
+be the very drift that made the incident possible. A daemon too old to carry
+the field cannot answer — which is itself the answer. -/
+private inductive HealthVerdict where
+  | unreachable
+  | serving
+  | wrongCheckpoint (detail : String)
+
+private def checkServerHealth (cfg : RuntimeConfig) : IO HealthVerdict := do
   let out ← IO.Process.output {
     cmd := "curl"
     args := #[
@@ -247,13 +222,44 @@ private def checkServerHealth (cfg : RuntimeConfig) : IO Bool := do
     ]
   }
   if out.exitCode != 0 then
-    return false
+    return .unreachable
   match Json.parse out.stdout with
-  | .error _ => return false
+  | .error _ => return .unreachable
   | .ok payload =>
     match payload.getObjValAs? Bool "ok" with
-    | .ok ok => return ok
-    | .error _ => return false
+    | .error _ => return .unreachable
+    | .ok false => return .unreachable
+    | .ok true =>
+      match payload.getObjValAs? Bool "matches_pin" with
+      | .error _ =>
+        return .wrongCheckpoint
+          "it predates the checkpoint fingerprint, so it cannot say what it loaded"
+      | .ok true => return .serving
+      | .ok false =>
+        let sha :=
+          match payload.getObjValAs? String "checkpoint_sha256" with
+          | .ok s => s.take 16
+          | .error _ => "unknown"
+        -- A mismatch the operator asked for is a supported configuration —
+        -- era comparisons and self-trained weights are why
+        -- `--allow-unverified-checkpoint` exists, and refusing those outright
+        -- would make the flag serve `/infer` while `satp` silently fell back to
+        -- plain aesop. Consent has to be given on both sides, though: the
+        -- service says it was waived, and this caller has to say it wants a
+        -- waived one. Neither alone is enough, so a waived daemon left running
+        -- cannot be picked up by an ordinary run.
+        let waived :=
+          match payload.getObjValAs? Bool "unverified_waived" with
+          | .ok b => b
+          | .error _ => false
+        let callerOptedIn := (← IO.getEnv "SATP_ALLOW_UNVERIFIED_SERVICE").isSome
+        if waived && callerOptedIn then
+          return .serving
+        if waived then
+          return .wrongCheckpoint
+            s!"it loaded {sha}…, started with --allow-unverified-checkpoint; set SATP_ALLOW_UNVERIFIED_SERVICE to use it"
+        return .wrongCheckpoint
+          s!"it loaded {sha}…, which is not the checkpoint its pin names"
 
 private def commandExists (name : String) : IO Bool := do
   try
@@ -280,18 +286,35 @@ private def spawnService (cfg : RuntimeConfig) (runner : ServiceRunner) : IO Uni
   }
   pure ()
 
-private partial def waitForServer (cfg : RuntimeConfig) (attempts : Nat := 240) : IO Bool := do
+/-- Stops early on `wrongCheckpoint`: a service that came up holding the wrong
+weights will keep holding them, so polling it for another 60 s only delays a
+message that is already decided. -/
+private partial def waitForServer (cfg : RuntimeConfig) (attempts : Nat := 240) : IO HealthVerdict := do
   if attempts == 0 then
-    return false
-  if ← checkServerHealth cfg then
-    return true
-  IO.sleep 250
-  waitForServer cfg (attempts - 1)
+    return .unreachable
+  match ← checkServerHealth cfg with
+  | .serving => return .serving
+  | .wrongCheckpoint detail => return .wrongCheckpoint detail
+  | .unreachable =>
+    IO.sleep 250
+    waitForServer cfg (attempts - 1)
+
+private def wrongCheckpointMessage (cfg : RuntimeConfig) (detail : String) : MessageData :=
+  m!"satp: the service on {cfg.host}:{cfg.port} is not serving the pinned checkpoint — {detail}\n" ++
+  m!"  • This checkout expects: {cfg.checkpoint}\n" ++
+  m!"  • Refusing to use it rather than returning tactics from unknown weights.\n" ++
+  m!"  • Stop that process and start one from this checkout, or point\n" ++
+  m!"    SATP_SERVER_PORT at the right service."
 
 private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageData Unit) := do
-  let healthy : Bool ← liftM (m := IO) <| checkServerHealth cfg
-  if healthy then
-    return .ok ()
+  match ← liftM (m := IO) <| checkServerHealth cfg with
+  | .serving => return .ok ()
+  | .wrongCheckpoint detail =>
+    -- Do not spawn over it. The port is held, so a replacement would fail to
+    -- bind and time out below with a message about a missing checkpoint —
+    -- three plausible causes, none of them the real one.
+    return .error (wrongCheckpointMessage cfg detail)
+  | .unreachable =>
   let runner? ← liftM (m := IO) <| pickServiceRunner cfg "--serve"
   let some runner := runner?
     | return .error (pythonEnvironmentMessage cfg)
@@ -301,9 +324,10 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
     return .error (m!"satp: failed to start inference service\n" ++
       m!"  • Command: {describeRunner runner}\n" ++
       m!"  • Try running `./setup.sh` in {cfg.repoRoot}")
-  let ready : Bool ← liftM (m := IO) <| waitForServer cfg
-  if ready then
-    return .ok ()
+  match ← liftM (m := IO) <| waitForServer cfg with
+  | .serving => return .ok ()
+  | .wrongCheckpoint detail => return .error (wrongCheckpointMessage cfg detail)
+  | .unreachable =>
   return .error (
     m!"satp: inference service did not respond (timeout after 60s)\n" ++
     m!"  • Service command: {describeRunner runner}\n" ++
@@ -316,10 +340,12 @@ private def ensureServerRunning (cfg : RuntimeConfig) : TacticM (Except MessageD
 
 private def callInferenceService
     (cfg : RuntimeConfig)
-    (formalStatement : String)
+    (policyInput : String)
     (userLemmas : Array String)
     (stripRetrieval : Bool := false)
     (hintPriority : Nat := 40) : TacticM (Except MessageData String) := do
+  -- `formal_statement` is the legacy JSON field name. In v2 it carries
+  -- the policy input, which is a Lean goal-state string.
   -- Extra fields on top of the legacy (formal_statement / user_lemmas /
   -- tactic_name) contract drive the satp? 3-layer cascade:
   --   • strip_retrieval = true  → server drops the policy's retrieval-
@@ -328,7 +354,7 @@ private def callInferenceService
   --     user_lemmas as aesop rules (50 for cascade layers that carry
   --     hints, 40 for the legacy code path)
   let requestBody := Json.compress <| Json.mkObj [
-    ("formal_statement", Json.str formalStatement),
+    ("formal_statement", Json.str policyInput),
     ("user_lemmas", Json.arr <| userLemmas.map Json.str),
     ("tactic_name", Json.str "aesop"),
     ("strip_retrieval", Json.bool stripRetrieval),
@@ -386,13 +412,99 @@ private def parseReturnedTactic
   | .ok tacticSeq =>
     return .ok tacticSeq
 
+-- Runtime-inclusive except-shaping. Plain `try/catch` — and the outer
+-- `first` combinator at every call site — RETHROW runtime exceptions
+-- (`maxRecDepth`/heartbeats, see `Core.tryCatch`), so e.g. a `by simp`
+-- rule inside the emitted config blowing `maxRecDepth` would abort the
+-- whole gap and shadow every later cascade branch. Interrupts still
+-- propagate (tryCatchRuntimeEx never catches those).
+private def exceptRuntime (x : TacticM α) : TacticM (Except MessageData α) :=
+  tryCatchRuntimeEx (Except.ok <$> x) fun e => do
+    -- Heartbeats are monotonic and survive backtracking — containing an
+    -- exhaustion would just re-time-out downstream (or let a cheap
+    -- fallback slip in under an already-blown budget). Rethrow those;
+    -- contain depth blowups + regular errors only.
+    if e.isMaxHeartbeat then throw e else pure (.error e.toMessageData)
+
 private def evalReturnedTactic
-    (tacticSeq : TSyntax ``tacticSeq) : TacticM (Except MessageData Unit) := do
-  try
-    evalTactic tacticSeq
-    return .ok ()
-  catch err =>
-    return .error err.toMessageData
+    (tacticSeq : TSyntax ``tacticSeq) : TacticM (Except MessageData Unit) :=
+  exceptRuntime (evalTactic tacticSeq)
+
+-- Per-call heartbeat budget for the policy execution (2026-08-11).
+-- satp-policy-v4.27's card reports every number under `maxHeartbeats
+-- 200000`, one satp call per declaration — this is that regime's
+-- faithful translation to multi-gap Form A files: each `satp`/`satp?`
+-- call gets its own 200000, counted from the call's start. Outside the
+-- call the file's own setting (hb 0 in Form A headers) still governs,
+-- so the `bfsaesop` branch and everything downstream keep today's
+-- semantics.
+private def satpGapHeartbeats : Nat := 200000
+
+-- Budget scoping mirrors Core.withCurrHeartbeatsImp: one withReader
+-- that rebases the counter AND pins the limit. Deliberately NOT
+-- `set_option maxHeartbeats … in`: the live limit sits in the
+-- `Core.Context.maxHeartbeats` FIELD (options are only read at context
+-- creation), and mid-declaration option writes silently miss it — same
+-- trap as maxRecDepth (report/sbfs_leak_2026_08_10). Field units are
+-- option-value × 1000 (CoreM.getMaxHeartbeats).
+private def withGapHeartbeatsImp (x : CoreM α) : CoreM α := do
+  let heartbeats ← IO.getNumHeartbeats
+  withReader (fun ctx => { ctx with
+    initHeartbeats := heartbeats
+    maxHeartbeats := satpGapHeartbeats * 1000 }) x
+
+private def withGapHeartbeats [Monad m] [MonadControlT CoreM m] (x : m α) : m α :=
+  controlAt CoreM fun runInBase => withGapHeartbeatsImp (runInBase x)
+
+private def ambientMaxHeartbeats : CoreM Nat :=
+  return (← read).maxHeartbeats
+
+-- Like `exceptRuntime` but ALSO contains heartbeat exhaustion when
+-- `containHb` is true. Callers pass `containHb := ambient limit == 0`:
+-- the scoped burn advanced the global monotonic counter, so under a
+-- FINITE ambient limit the enclosing declaration is already (or soon)
+-- exhausted and containment would just move the rethrow to whatever
+-- runs next (fallback aesop, the next `first` branch) — old-behavior
+-- rethrow at the call site is strictly clearer there. Under ambient
+-- hb 0 (every Form A header) no re-trip is possible and containment
+-- is sound: the monotonic-exhaustion rationale in `exceptRuntime`
+-- does not apply. Interrupts still propagate (tryCatchRuntimeEx never
+-- delivers those). The Bool in the error marks hb-exhaustion so the
+-- caller can emit the audit event (see `emitHbCapEvent`).
+private def exceptRuntimeHb (containHb : Bool) (x : TacticM α) :
+    TacticM (Except (Bool × MessageData) α) :=
+  tryCatchRuntimeEx (Except.ok <$> x) fun e => do
+    if e.isMaxHeartbeat then
+      if containHb then
+        -- No count in the prefix: a nested smaller budget (e.g.
+        -- synthInstance.maxHeartbeats) raises the same exception kind,
+        -- and the real number is already in `e.toMessageData`.
+        pure (.error (true, m!"scoped heartbeat budget exhausted: {e.toMessageData}"))
+      else
+        throw e
+    else
+      pure (.error (false, e.toMessageData))
+
+-- Cap-fire audit channel: the generated
+-- `first` wrapper backtracks over a failed satp branch, and
+-- `Tactic.SavedState.restore` rewinds the message log — so
+-- `satp_layer=…,status=fail` records never survive into the Form A
+-- log when a later branch wins. IO side effects DO survive
+-- backtracking: when `SATP_HB_LOG` is set, append one line per
+-- cap-fire (O_APPEND, one short line, atomic-at-EOF on LOCAL
+-- filesystems only — O_APPEND atomicity does not hold on NFS, so
+-- point SATP_HB_LOG at local disk). Env unset → no-op. Telemetry
+-- must never break proving: all IO failures are swallowed.
+private def emitHbCapEvent (stxRef : Syntax) : TacticM Unit := do
+  match ← IO.getEnv "SATP_HB_LOG" with
+  | none => pure ()
+  | some path =>
+    try
+      let fname ← liftM (m := CoreM) (return (← read).fileName)
+      let pos := (← getFileMap).toPosition (stxRef.getPos?.getD 0)
+      liftM (m := IO) <| IO.FS.withFile path .append fun h =>
+        h.putStrLn s!"{fname}:{pos.line}:{pos.column} hb_cap_fired"
+    catch _ => pure ()
 
 -- Emit a single, positionally-anchored Try-this suggestion for a cascade
 -- layer that just closed the goal. The message is a `logInfoAt stxRef`
@@ -439,7 +551,7 @@ private def fallbackToAesop
 -- should be retried or investigated rather than silently counted as
 -- SATP misses.
 inductive SatpFailKind where
-  | input    (msg : MessageData)   -- could not collect goal/theorem input
+  | input    (msg : MessageData)   -- could not collect policy input
   | request  (msg : MessageData)   -- /infer HTTP call itself failed
   | parse    (msg : MessageData)   -- returned text couldn't be parsed
   | exec     (msg : MessageData)   -- tactic parsed but elaboration threw
@@ -475,15 +587,21 @@ private def tryInferLayer
     (layerLabel : String)
     (clearKeep : Array String)
     (emitClear : Bool) : TacticM (Except SatpFailKind Unit) := do
-  let formalStatement ←
-    try collectSatpInput
-    catch e => return .error (.input e.toMessageData)
-  match ← callInferenceService cfg formalStatement userLemmas stripRetrieval hintPriority with
+  let policyInputE ← exceptRuntime collectSatpInput
+  let policyInput ←
+    match policyInputE with
+    | .ok pi => pure pi
+    | .error msg => return .error (.input msg)
+  match ← callInferenceService cfg policyInput userLemmas stripRetrieval hintPriority with
   | .error reason => return .error (.request reason)
   | .ok tacticString =>
       match ← parseReturnedTactic tacticString with
       | .error reason => return .error (.parse reason)
       | .ok tacticSeq =>
+          -- Audit only goals that are ours to close: goals already
+          -- assigned before the policy ran (possible in arbitrary user
+          -- tactic states) must not trip the sorryAx guard below.
+          let gs ← (← getGoals).filterM fun g => return !(← g.isAssigned)
           match ← evalReturnedTactic tacticSeq with
           | .error reason => return .error (.exec reason)
           | .ok () =>
@@ -494,6 +612,14 @@ private def tryInferLayer
               -- bodies.
               try
                 evalTactic (← `(tactic| done))
+                -- sorryAx-closure guard: errToSorry recovery (or an
+                -- emitted `sorry`) can "close" a goal with sorryAx — a
+                -- fake win that would shadow later cascade branches.
+                -- Aesop.hasSorry (not Expr.hasSorry ∘ instantiateMVars):
+                -- it also follows delayed mvar assignments.
+                for g in gs do
+                  if ← Aesop.hasSorry (mkMVar g) then
+                    return .error (.exec m!"emitted tactic closed the goal with sorryAx")
                 if traceScript then
                   emitLayerSuggestion stxRef layerLabel clearKeep emitClear tacticString
                 return .ok ()
@@ -542,12 +668,9 @@ private def runSatpCascade
     (lemmaNames : Array String)
     (traceScript : Bool := false) : TacticM Unit := do
   let _ := lemmaNames
-  -- Emit the resolved input-rendering mode once per call so downstream
-  -- tooling / ablation analysis can tell `theorem` and `goal` runs apart
-  -- without re-reading the env. Done here, before any saveState region,
-  -- so the record survives `snap.restore` on policy failure.
-  let inputMode := (← IO.getEnv "SATP_INPUT_MODE").getD "theorem"
-  logInfoAt stxRef s!"satp_input_mode={inputMode}"
+  -- Emit before any saveState region so the record survives
+  -- `snap.restore` on policy failure.
+  logInfoAt stxRef "satp_input_mode=goal"
   -- Separate event from the policy call so budget-sweep replay can
   -- account for cold-spawn overhead (health check + waitForServer can
   -- cost tens of seconds on the first call after boot; warm hits are
@@ -567,16 +690,48 @@ private def runSatpCascade
   | .ok () =>
       logInfoAt stxRef s!"satp_layer=ensure_server,ms={tEnsure1 - tEnsure0},status=ok"
   let snap ← saveState
+  -- Message-log watermark (2026-08-10): term-elab failures inside the
+  -- emitted config can be LOGGED + errToSorry'd instead of thrown —
+  -- tryInferLayer then reports success while a file-level error sits in
+  -- the log (⇒ lake rc=1), and no restore ever runs on that
+  -- spurious-success path (only failure paths restore, and
+  -- `Tactic.SavedState.restore` does reset the log). So: any new
+  -- error-severity message during the policy eval ⇒ downgrade to
+  -- exec-failure and let the failure path's restore drop the messages.
+  let msgsSaved ← Core.getMessageLog
+  let errCount : MessageLog → Nat := fun l =>
+    (l.toList.filter (fun m => m.severity matches .error)).length
   let t0 ← IO.monoMsNow
-  -- Outer try/catch is defensive: tryInferLayer already classifies all
-  -- paths it owns. An exception escaping here would be a Lean-level
-  -- tactic crash outside evalReturnedTactic — extremely rare, but we
-  -- still tag it as `exec` rather than silently swallowing.
-  let result : Except SatpFailKind Unit ← try
+  -- Outer catch is defensive: tryInferLayer already classifies all
+  -- paths it owns. Runtime-inclusive AND (under ambient hb 0)
+  -- heartbeat-inclusive — there the policy execution runs under its
+  -- own rebased per-call budget (withGapHeartbeats), so exhaustion is
+  -- a branch verdict, not a file event: fail the layer, restore, and
+  -- let the outer `first` hand the gap to the next branch. Finite
+  -- ambient (e2e's default 200k, user-raised budgets): NO scope and
+  -- NO containment — the exec runs on the ambient budget and hb
+  -- rethrows, bit-identical to the pre-cap behavior. Scope and
+  -- containment share one condition so neither can drift alone.
+  let ambientMax ← ambientMaxHeartbeats
+  let policyExec : TacticM (Except SatpFailKind Unit) :=
     tryInferLayer stxRef cfg #[] false 40 traceScript "policy" #[] false
-  catch e => pure (.error (.exec e.toMessageData))
+  let policyExec := if ambientMax == 0 then withGapHeartbeats policyExec else policyExec
+  let result : Except SatpFailKind Unit ←
+    match ← exceptRuntimeHb (containHb := ambientMax == 0) policyExec with
+    | .ok inner => pure inner
+    | .error (isHb, msg) => do
+        if isHb then emitHbCapEvent stxRef
+        pure (.error (.exec msg))
   let t1 ← IO.monoMsNow
   let elapsed := t1 - t0
+  let result : Except SatpFailKind Unit ←
+    match result with
+    | .ok () =>
+        if errCount (← Core.getMessageLog) > errCount msgsSaved then
+          pure (.error (.exec m!"emitted tactic logged error diagnostics (logged-error guard)"))
+        else
+          pure (.ok ())
+    | e => pure e
   match result with
   | .ok () =>
       logInfoAt stxRef s!"satp_layer=policy,ms={elapsed},status=ok"
