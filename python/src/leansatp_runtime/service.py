@@ -23,9 +23,9 @@ from typing import Any, Optional
 _DEFAULT_MAX_INFLIGHT = 8
 _DEFAULT_INFER_CACHE_SIZE = 10000
 _SEMAPHORE_ACQUIRE_TIMEOUT = 45.0  # must stay below Bridge.lean's curl timeout
-DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/satp-policy-goal/best_checkpoint.pt"
+DEFAULT_CHECKPOINT_SOURCE = "hf://ChristianZ97/satp-policy-v2/best_checkpoint.pt"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache")
+DEFAULT_CACHE_DIR = str(_PACKAGE_ROOT / "cache_v2")
 DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 
 # Retrieval assets live on the same HF repo as the checkpoint, under a
@@ -34,9 +34,12 @@ DEFAULT_CHECKPOINT = str(Path(DEFAULT_CACHE_DIR) / "best_checkpoint.pt")
 # ``cache_dir/<basename>`` so ``policy.py``'s ``load_premise_embeddings``
 # (which reads ``cache_dir/premise_embeddings.npy`` etc.) finds them.
 DEFAULT_RETRIEVAL_FILES = (
-    "premises/premise_embeddings.npy",
+    "premises/premise_embeddings.npy",  # v1 (satp-policy-goal) layout
     "premises/premises_raw.npy",
     "premises/bm25_index.pkl",
+    "cache/premise_embeddings.npy",  # v2 (satp-policy-v2) layout; absent names skip silently
+    "cache/mathlib4_premises.txt",
+    # names flatten to basenames — don't point two ckpt generations at one cache dir
 )
 
 _torch = None
@@ -131,9 +134,19 @@ def ensure_checkpoint_download(
     if checkpoint_source.startswith("hf://"):
         from huggingface_hub import hf_hub_download
 
+        from leansatp_runtime.hf_pin import HF_REPO, REVISION
+
         repo_id, filename = _parse_hf_checkpoint_source(checkpoint_source)
         with _suppress_startup_noise():
-            downloaded = Path(hf_hub_download(repo_id=repo_id, filename=filename))
+            downloaded = Path(
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    # pin the whole bundle (source + weights + assets) to one
+                    # immutable revision — see hf_pin.py
+                    revision=REVISION if repo_id == HF_REPO else None,
+                )
+            )
     else:
         downloaded = _normalize_local_path(checkpoint_source)
         if not downloaded.exists() or not downloaded.is_file():
@@ -162,7 +175,10 @@ def ensure_retrieval_download(
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
 
+    from leansatp_runtime.hf_pin import HF_REPO, REVISION
+
     repo_id, _ = _parse_hf_checkpoint_source(checkpoint_source)
+    revision = REVISION if repo_id == HF_REPO else None
     destination_dir = Path(cache_dir).expanduser().resolve(strict=False)
     destination_dir.mkdir(parents=True, exist_ok=True)
 
@@ -174,7 +190,11 @@ def ensure_retrieval_download(
         target = destination_dir / Path(filename).name
         try:
             with _suppress_startup_noise():
-                source_path = Path(hf_hub_download(repo_id=repo_id, filename=filename))
+                source_path = Path(
+                    hf_hub_download(
+                        repo_id=repo_id, filename=filename, revision=revision
+                    )
+                )
         except (EntryNotFoundError, HfHubHTTPError):
             continue
         if source_path.resolve() != target.resolve():
@@ -343,6 +363,33 @@ def _validate_checkpoint_shape(state_dict) -> None:
         )
 
 
+# T5 feed-forward sub-layer linears live at `…DenseReluDense.{wi_0,wi_1,wo}`.
+# Training regimes through 2026-05 LoRA-wrapped them alongside attention; the
+# `only_DPO_RL` regime folded the wrapped FF weights back into plain Linears
+# before upload. The runtime auto-detects which format is on disk so both
+# layouts load without an explicit config flag.
+_FF_LORA_NAMES = ("wi_0", "wi_1", "wo")
+
+
+def _detect_lora_targets(state_dict) -> tuple[str, ...]:
+    """Return LoRA target_modules that reproduce the checkpoint's wrapper layout.
+
+    Default (attention-only) matches current training. When FF sub-layers ship
+    LoRA-decomposed keys (older checkpoints), extend targets to include
+    ``wi_0/wi_1/wo`` so module construction recreates the same wrapper
+    hierarchy and ``load_state_dict`` finds every key.
+    """
+    targets = list(_LoRAConfig().target_modules)
+    has_ff_lora = any(
+        f".DenseReluDense.{name}.lora_A" in key
+        for key in state_dict
+        for name in _FF_LORA_NAMES
+    )
+    if has_ff_lora:
+        targets.extend(_FF_LORA_NAMES)
+    return tuple(targets)
+
+
 def _validate_state_dict_load(incompatible_keys) -> None:
     """Reject a state_dict load that is not a perfect parameter-name match."""
     missing = list(incompatible_keys.missing_keys)
@@ -363,14 +410,49 @@ def load_policy(checkpoint_path: str, cache_dir: str, device: str | None = None)
     checkpoint_path = ensure_local_checkpoint(checkpoint_path)
     device = device or preferred_device()
 
+    # weights_only=False: the ckpt embeds numpy objects; acceptable because
+    # every hf:// artifact is pinned to one immutable revision (hf_pin.py)
     ckpt = _torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
+
+    # v2 ckpts carry tactic_heads.tactic_emb, v1 tactic_heads.safe_group.*;
+    # route on the fingerprint (same spirit as the FF-LoRA auto-detect below).
+    if "tactic_heads.tactic_emb" in state_dict:
+        from leansatp_runtime.models import policy_v2 as _pv2
+
+        log_server(
+            "INFO",
+            "[LeanSATP] v2 checkpoint detected (factored joint-action heads); "
+            "using policy_v2 runtime",
+        )
+        with _suppress_startup_noise():
+            model = _pv2.build_policy_v2(ckpt, cache_dir, device=device)
+        try:
+            model.load_premise_embeddings()
+            retrieval_enabled = True
+        except FileNotFoundError as exc:
+            retrieval_enabled = False
+            log_server(
+                "INFO",
+                f"[LeanSATP] Retrieval disabled: {exc}",
+            )
+        model.to(device)
+        model.eval()
+        return model, device, retrieval_enabled
+
     _validate_checkpoint_shape(state_dict)
+
+    lora_targets = _detect_lora_targets(state_dict)
+    if set(lora_targets) != set(_LoRAConfig().target_modules):
+        log_server(
+            "INFO",
+            f"[LeanSATP] checkpoint LoRA targets: {lora_targets} (legacy FF-LoRA detected)",
+        )
 
     with _suppress_startup_noise():
         model = _AesopPolicy(
             use_lora=True,
-            lora_config=_LoRAConfig(),
+            lora_config=_LoRAConfig(target_modules=lora_targets),
             device=device,
             cache_dir=cache_dir,
         )
@@ -395,6 +477,10 @@ def render_full_proof(formal_statement: str, tactic: str) -> str:
     return formal_statement.rstrip() + "\n" + textwrap.indent(tactic.rstrip(), "  ")
 
 
+def _trace_label(policy_input: str) -> str:
+    return "Policy input" if "⊢" in policy_input else "Full proof"
+
+
 def _indent_block(block: str, prefix: str = "    ") -> str:
     """Indent a multi-line block for human-readable stderr traces."""
     cleaned = block.rstrip() or "<empty>"
@@ -408,9 +494,10 @@ def render_full_proof_trace(
     device: str,
 ) -> str:
     """Render the generated proof as a plain-text stderr block."""
+    label = _trace_label(formal_statement)
     return "\n".join(
         [
-            f"[LeanSATP] Full proof ({device}):",
+            f"[LeanSATP] {label} ({device}):",
             _indent_block(render_full_proof(formal_statement, tactic)),
         ]
     )
@@ -432,9 +519,10 @@ def print_full_proof_trace(
     _ensure_rich()
     if enable_color and _RichConsole and _RichSyntax:
         console = _make_console(stream)
+        label = _trace_label(formal_statement)
         log_server(
             "INFO",
-            f"[bold magenta][LeanSATP] Full proof[/bold magenta] "
+            f"[bold magenta][LeanSATP] {label}[/bold magenta] "
             f"([bold yellow]{device}[/bold yellow]):",
             stream=stream,
             enable_color=True,
@@ -472,7 +560,7 @@ def render_try_me_message(host: str, port: int) -> str:
         "curl --request POST \\\n"
         f"  --url http://{curl_host}:{port}/infer \\\n"
         "  --header 'Content-Type: application/json' \\\n"
-        '  --data \'{"formal_statement":"theorem t : True := by"}\' | jq\n',
+        '  --data \'{"formal_statement":"⊢ True"}\' | jq\n',
         "  ",
     )
 
@@ -545,11 +633,30 @@ def policy_tactic(
     tactic_name: str = "aesop",
     user_lemmas: Optional[list[str]] = None,
     user_lemma_priority: Optional[int] = None,
+    strip_retrieval: bool = False,
 ) -> str:
-    """Generate a LeanSATP tactic by greedy policy inference."""
+    """Greedy policy inference. ``strip_retrieval`` only acts here for v2
+    (decode-time); the v1 path ignores it and keeps the caller-side text strip."""
     _ensure_imports()
 
     model, device, retrieval_enabled = model_and_device
+
+    if getattr(model, "arch", "v1") == "v2":
+        from leansatp_runtime.models import policy_v2 as _pv2
+
+        tactic = _pv2.policy_tactic_v2(
+            model,
+            device,
+            formal_statement,
+            retrieval_enabled=retrieval_enabled,
+            tactic_name=tactic_name,
+            strip_retrieval=strip_retrieval,
+        )
+        kwargs: dict = {}
+        if user_lemma_priority is not None:
+            kwargs["priority_pct"] = user_lemma_priority
+        return append_user_lemmas(tactic, user_lemmas, **kwargs)
+
     top_k_premises = None
     lemma_scores = None
     lemma_embs = None
@@ -698,7 +805,7 @@ class SATPInferenceEngine:
         # Run the policy WITHOUT appending user lemmas; user_lemma append
         # and retrieval strip are handled below so the order is explicit:
         #   policy output  →  (optional) strip retrieval rules  →  append hints
-        policy_kwargs = dict(tactic_name=tactic_name)
+        policy_kwargs = dict(tactic_name=tactic_name, strip_retrieval=strip_retrieval)
         with self._lock:
             try:
                 tactic = policy_tactic(
@@ -1100,6 +1207,14 @@ def main() -> int:
             retrieval_paths = ensure_retrieval_download(
                 args.cache_dir, args.checkpoint_source
             )
+        # prefetch + validate the pinned inference source so a later offline
+        # service start never has to contact HF (importing runs the download);
+        # only for the v2 repo — v1/custom sources never touch the v2 pin
+        from leansatp_runtime.hf_pin import HF_REPO as _pin_repo
+
+        if args.checkpoint_source.startswith(f"hf://{_pin_repo}/"):
+            from leansatp_runtime.models import policy_v2 as _pv2  # noqa: F401
+
         print(
             json.dumps(
                 {

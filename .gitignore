@@ -3,6 +3,7 @@ lake-manifest.json
 .venv/
 cache/
 cache_goal/
+cache_v2/
 SATP-Training/
 python/.ruff_cache/
 python/.mypy_cache/
@@ -11,3 +12,7 @@ python/src/*.egg-info/
 uv.lock
 **/__pycache__/
 .DS_Store
+deps/
+deps/_lc_build.log
+proofs/minif2f_test_v2/traced/
+proofs/minif2f_test_v2/manifest_run.jsonl

@@ -12,10 +12,11 @@ dependencies = [
     "bm25s>=0.3",
     "huggingface-hub",
     "numpy",
+    "requests",
     "rich>=13.0.0",
     "torch==2.5.1",
     "tqdm",
-    "transformers>=4.44,<5",
+    "transformers>=4.0.0",
 ]
 
 [tool.setuptools.package-dir]

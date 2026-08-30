@@ -183,6 +183,25 @@ class SATPInferenceEngineTests(unittest.TestCase):
         self.assertIn("    theorem t : True := by", output)
         self.assertIn("      aesop (config := { maxRuleApplications := 42 })", output)
 
+    def test_goal_state_trace_is_labelled_policy_input(self) -> None:
+        def fake_load_policy(_checkpoint: str, _cache: str, device: str | None = None):
+            return (f"{device}-model", device, False)
+
+        tactic = "aesop"
+        stderr = StringIO()
+        with (
+            patch.object(service, "preferred_device", return_value="cpu"),
+            patch.object(service, "load_policy", side_effect=fake_load_policy),
+            patch.object(service, "policy_tactic", return_value=tactic),
+            redirect_stderr(stderr),
+        ):
+            engine = service.SATPInferenceEngine("checkpoint", "cache")
+            engine.infer(formal_statement="P : Prop\nh : P\n⊢ P")
+
+        output = stderr.getvalue()
+        self.assertIn("INFO     [LeanSATP] Policy input (cpu):", output)
+        self.assertIn("    ⊢ P", output)
+
     def test_full_proof_trace_can_be_colorized(self) -> None:
         stream = StringIO()
         service.print_full_proof_trace(
@@ -378,9 +397,7 @@ class SATPServerLifecycleTests(unittest.TestCase):
         self.assertIn("INFO     Try me with:", output)
         self.assertIn("curl --request POST \\", output)
         self.assertIn("--url http://localhost:5177/infer \\", output)
-        self.assertIn(
-            '--data \'{"formal_statement":"theorem t : True := by"}\' | jq', output
-        )
+        self.assertIn('--data \'{"formal_statement":"⊢ True"}\' | jq', output)
         self.assertNotIn("tactic_name", output)
         self.assertIn("INFO     Shutting down", output)
         self.assertIn("INFO     Waiting for application shutdown.", output)
