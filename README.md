@@ -44,8 +44,9 @@ Full DSP pipeline (draft → sketch → prove cascade) on miniF2F-test (244):
 
 Pipeline numbers are produced by the private companion repo `SATP-DSP-Eval`,
 pinned at commit `d10ef888f5f2` — the HEAD under which every run in the table
-executed, whose LeanSATP submodule gitlink resolves to this branch; this
-branch supplies the SATP policy service those runs call.
+executed, whose LeanSATP submodule gitlink lies on the archived v2 lineage
+(kept as tag `archive/v2`); this branch supplies the SATP policy service
+those runs call.
 
 ### Which environment ran what
 
