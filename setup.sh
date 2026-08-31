@@ -10,7 +10,7 @@
 #
 #   deps/aesop        = leanprover-community/aesop @ cb837cc + bfsScore patch
 #                       (mathlib v4.27's own pinned aesop rev)
-#                       (aesop-bfsscore.patch, committed next to this script)
+#                       (patches/aesop-bfsscore.patch in this repo)
 #   deps/LeanCopilot  = lean-dojo/LeanCopilot     @ v4.27.0  (+ CTranslate2)
 #   deps/mathlib4     = leanprover-community/mathlib4 @ a3a10db0e9 (v4.27.0,
 #                       = ChristianZ97/*-satp-v4.27 dataset pin),
@@ -31,7 +31,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPS="$ROOT/deps"
 CT2LIB="$DEPS/LeanCopilot/.lake/build/lib"
-PATCH="$ROOT/aesop-bfsscore.patch"
+PATCH="$ROOT/patches/aesop-bfsscore.patch"
 FORCE="${FORCE:-0}"
 
 TOOLCHAIN="leanprover/lean4:v4.27.0"

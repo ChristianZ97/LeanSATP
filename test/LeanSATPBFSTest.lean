@@ -6,7 +6,7 @@ target (BFS is opt-in); run it explicitly:
 
   CT2LIB=deps/LeanCopilot/.lake/build/lib
   LD_LIBRARY_PATH="$CT2LIB" lake build LeanSATP.BFS   # setup.sh:169 shape
-  LD_LIBRARY_PATH="$CT2LIB" lake env lean LeanSATPBFSTest.lean  # PASS = rc 0
+  LD_LIBRARY_PATH="$CT2LIB" lake env lean test/LeanSATPBFSTest.lean  # PASS = rc 0
 
 It fails if either (a) the containment regresses — the nested `by` below
 blows maxRecDepth, which Lean core ADMITS via sorryAx and merely LOGS

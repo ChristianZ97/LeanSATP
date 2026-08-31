@@ -4,23 +4,14 @@ LeanSATP is the Lean 4 package implementing **SATP** (*Steering Aesop for Theore
 
 This branch is a standalone Lean `v4.27.0` environment. Run Lean from the repository root so Lake uses this repo's toolchain and bundled deps.
 
-## Branches
-
-| branch | policy checkpoint (HF, pinned) | eval dataset (HF, pinned) | Lean environment |
-|---|---|---|---|
-| `main` (this branch) | [`ChristianZ97/satp-policy-v4.27`](https://huggingface.co/ChristianZ97/satp-policy-v4.27) `8ed997e1` | [`ChristianZ97/minif2f-satp-v4.27`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp-v4.27) `94424f13` | standalone `v4.27.0` (below) |
-| `v2` | [`ChristianZ97/satp-policy-v2`](https://huggingface.co/ChristianZ97/satp-policy-v2) `449f192d` | [`ChristianZ97/minif2f-satp`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp) `32ed7f63` | standalone `v4.26.0` (see the `v2` README) |
-| `legacy` | [`ChristianZ97/satp-policy-goal`](https://huggingface.co/ChristianZ97/satp-policy-goal) (paper, v1) | miniF2F (paper) | Lean `v4.17.0-rc1` + DSP-Plus Mathlib fork (see the `legacy` README) |
-
-The `main` and `v2` branches pin their checkpoint, dataset, and Lean dependency tree, so those eras stay reproducible end to end; `legacy` predates the pinning setup and tracks the latest revision of its checkpoint repo. Evaluation is defined by `reproduce.py` in the pinned policy repo, and detailed numbers with their caveats live on the model cards. A proof counts only with zero `sorry` and a clean `#print axioms` audit (no `sorryAx`).
-
-Machine-checked proofs from the full draft → sketch → prove pipeline (MiniF2F, ProofNet#, PutnamBench) are published in [`ChristianZ97/LeanSATP-Eval`](https://github.com/ChristianZ97/LeanSATP-Eval); every proof there compiles standalone on stock Mathlib.
-
 ## Environment
 
 - Lean toolchain `leanprover/lean4:v4.27.0` (`lean-toolchain`); Lake uses the bundled deps under `deps/` (no remote Mathlib cache).
-- Pinned deps: mathlib4 `a3a10db0e9` (stock, zero Mathlib changes), aesop `cb837cc` (+ local `bfsScore` rule set), LeanCopilot `v4.27.0` (no fork). All four are stamped in `deps/.pins`; `./setup.sh` wipes and rebuilds when the stamp does not match.
-- The checkpoint and its inference code (`infer.py` — model, greedy decode, tactic-string rendering) are downloaded at the pinned HF revision; `python/src/leansatp_runtime/hf_pin.py` is the single pin, and this repo hosts no second copy of the inference code.
+- Pinned deps: mathlib4 `a3a10db0e9` (stock, zero Mathlib changes), aesop `cb837cc` (+ local `bfsScore` rule set via `patches/aesop-bfsscore.patch`), LeanCopilot `v4.27.0` (no fork). All four are stamped in `deps/.pins`; `./setup.sh` wipes and rebuilds when the stamp does not match.
+- The SATP policy checkpoint and its inference code (`infer.py` — model, greedy decode, tactic-string rendering) are downloaded at the pinned revision `8ed997e1` of [`ChristianZ97/satp-policy-v4.27`](https://huggingface.co/ChristianZ97/satp-policy-v4.27); `python/src/leansatp_runtime/hf_pin.py` is the single pin, and this repo hosts no second copy of the inference code.
+- Evaluation is defined by `reproduce.py` in the pinned policy repo against [`ChristianZ97/minif2f-satp-v4.27`](https://huggingface.co/datasets/ChristianZ97/minif2f-satp-v4.27) `94424f13`; detailed numbers and their caveats live on the model card. A proof counts only with zero `sorry` and a clean `#print axioms` audit (no `sorryAx`).
+
+Machine-checked proofs from the full draft → sketch → prove pipeline (MiniF2F, ProofNet#, PutnamBench) are published in [`ChristianZ97/LeanSATP-Eval`](https://github.com/ChristianZ97/LeanSATP-Eval); every proof there compiles standalone on stock Mathlib.
 
 ## Setup
 
