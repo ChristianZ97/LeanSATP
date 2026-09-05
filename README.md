@@ -4,6 +4,8 @@ LeanSATP is the Lean 4 package implementing **SATP** (*Steering Aesop for Theore
 
 **Paper:** [OpenReview](https://openreview.net/forum?id=VncRNbkX2q)
 
+**Poster:** [NeSy 2026](kyjeng_conf_NeSy_2026_poster.pdf)
+
 This branch is a standalone Lean `v4.27.0` environment. Run Lean from the repository root so Lake uses this repo's toolchain and bundled deps.
 
 ## Environment
