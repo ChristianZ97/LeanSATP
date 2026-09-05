@@ -2,6 +2,8 @@
 
 LeanSATP is the Lean 4 package implementing **SATP** (*Steering Aesop for Theorem Proving*) — a framework for learning `aesop` configuration, formulated as a contextual multi-armed bandit and supervised directly by `aesop`'s deterministic execution and Lean 4's verification. The `satp` tactic queries a local inference service for a goal-tailored `aesop` configuration and runs it, falling back to plain `aesop` if the service is unavailable; `satp?` additionally prints the executed tactic as a "Try this" suggestion and throws on failure instead of falling back. The service only proposes the configuration — Lean executes and checks everything as usual.
 
+**Paper:** [OpenReview](https://openreview.net/forum?id=VncRNbkX2q)
+
 This branch is a standalone Lean `v4.27.0` environment. Run Lean from the repository root so Lake uses this repo's toolchain and bundled deps.
 
 ## Environment
